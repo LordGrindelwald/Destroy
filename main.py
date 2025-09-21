@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v2.2 - Final)
+#          (Definitive Version with All Fixes)
 
 import os
 import asyncio
@@ -394,7 +394,10 @@ async def main():
     
     # Conversation Handlers
     gen_conv = ConversationHandler(
-        entry_points=[CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command))],
+        entry_points=[
+            CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
+            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query.message, c), pattern="^call_generate$")
+        ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
@@ -441,7 +444,6 @@ async def main():
     application.add_handler(add_multiple_conv)
 
     # Callback Handlers
-    application.add_handler(CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
