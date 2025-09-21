@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Rework v2.3 - All Fixes)
+#          (Definitive Version v2.4 - All Fixes)
 
 import os
 import asyncio
@@ -59,6 +59,7 @@ active_userbots = {}
 paused_forwarding = set()
 paused_notifications = set()
 
+
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
     if not isinstance(text, str): text = str(text)
@@ -77,10 +78,8 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-        device_model=generate_device_name(),
-        system_version="Telegram Desktop 4.8.3",
-        app_version="4.8.3",
-        lang_code="en"
+        device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3",
+        app_version="4.8.3", lang_code="en"
     )
     try:
         await client.start()
@@ -149,7 +148,8 @@ async def get_target_chat():
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔️ You are not authorized.")
+        if update.message: await update.message.reply_text("⛔️ You are not authorized.")
+        elif update.callback_query: await update.callback_query.answer("⛔️ You are not authorized.", show_alert=True)
         return
     await command_handler(update, context)
 
@@ -250,9 +250,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # Session generation logic is now its own ConversationHandler, so this is for other inputs
-    del context.user_data['next_step']
+    # Session generation logic is handled by its own ConversationHandler now
+    if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
+        return
 
+    del context.user_data['next_step']
     if step == 'awaiting_source':
         try:
             chat_id = int(update.message.text)
@@ -304,18 +306,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Session Generator ---
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the session generation conversation."""
-    # Check if started from a button press
-    if update.callback_query:
-        await update.callback_query.answer()
-        message = update.callback_query.message
-    else:
-        message = update.message
-
+    message = update.message or update.callback_query.message
     await message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
     return PHONE
 
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles receiving the phone number."""
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
@@ -442,7 +437,7 @@ def main():
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$")
+            CallbackQueryHandler(lambda u, c: owner_only(u.callback_query, c, generate_command), pattern="^call_generate$")
         ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
@@ -463,13 +458,11 @@ def main():
     application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
     application.add_handler(gen_conv)
 
-    # Callback Handlers for simple state setting
+    # Callback Handlers
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please paste the session string."), pattern="^add_single$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please paste all session strings."), pattern="^add_multiple$"))
-
-    # Other Callback Handlers
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
