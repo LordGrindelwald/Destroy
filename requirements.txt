@@ -1,0 +1,5 @@
+python-telegram-bot
+pyrogram
+tgcrypto
+pymongo[srv]
+python-dotenv
