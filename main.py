@@ -480,6 +480,7 @@ async def main():
         application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
         application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
         application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
+        application.add_handler(CommandHandler("generate", lambda u, c: owner_only(u, c, ask_to_generate_session)))
 
         # Callback handlers for buttons
         application.add_handler(CallbackQueryHandler(ask_for_source_chat, pattern="^set_source$"))
