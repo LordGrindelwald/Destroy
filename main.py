@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Final Version with Database Fix)
+#          (Final Version with All Fixes)
 
 import os
 import asyncio
@@ -54,8 +54,14 @@ active_userbots = {}
 paused_forwarding = set()
 paused_notifications = set()
 
+def escape_markdown_v2(text: str) -> str:
+    """Helper function to escape text for Telegram MarkdownV2."""
+    if not isinstance(text, str):
+        text = str(text)
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
+
 # --- Userbot Core Logic ---
-# MODIFIED: These functions now safely handle a non-existent config document
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
     return config.get("source_chat_id", 777000) if config else 777000
@@ -80,12 +86,12 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
             else:
                 status_text = "⏸️ Paused (Forwarding Only)"
             content = message.text or message.caption or "(Media without caption)"
-            header = f"👤 **{client.me.first_name}**"
+            header = f"👤 **{escape_markdown_v2(client.me.first_name)}**"
             notification_text = (f"{header}\n**Status:** {status_text}\n\n**Content:**\n`{content[:3000]}`")
             await ptb_app.bot.send_message(OWNER_ID, notification_text, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception as e:
             logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
-            await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: `{e}`", parse_mode=ParseMode.MARKDOWN_V2)
+            await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: `{escape_markdown_v2(str(e))}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
     try:
@@ -117,7 +123,6 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
     logger.info(f"Started {count}/{len(all_accounts)} userbots.")
     return count, len(all_accounts)
 
-
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
@@ -138,7 +143,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = (
         f"👋 **Welcome\!**\n\n"
         f"▶️ **Source:** `{source_chat_id}`\n"
-        f"🎯 **Target:** `{target_chat}`"
+        f"🎯 **Target:** `{escape_markdown_v2(target_chat)}`"
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
@@ -151,8 +156,10 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accounts = list(accounts_collection.find())
     text = "👤 **Your Managed Accounts:**\n\n" if accounts else "No accounts have been added yet."
     for acc in accounts:
-        first_name = acc.get('first_name', 'N/A').replace('-', '\\-').replace('.', '\\.')
-        text += (f"**Name:** {first_name}\n**ID:** `{acc.get('user_id', 'N/A')}`\n{'-'*20}\n".replace('-', '\\-'))
+        first_name = escape_markdown_v2(acc.get('first_name', 'N/A'))
+        # CORRECTED: The separator line should not be escaped.
+        separator = '-'*20
+        text += f"**Name:** {first_name}\n**ID:** `{acc.get('user_id', 'N/A')}`\n{separator}\n"
     keyboard = [
         [InlineKeyboardButton("➕ Add Single", callback_data="add_single"), InlineKeyboardButton("➕ Add Multiple", callback_data="add_multiple")],
         [InlineKeyboardButton("« Back", callback_data="main_menu")],
@@ -193,7 +200,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_string = update.message.text
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
-        if status == "success": await msg.edit_text(f"✅ Account added: {user_info.first_name}")
+        if status == "success": await msg.edit_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
         elif status == "already_exists": await msg.edit_text("⚠️ Account already exists.")
         else: await msg.edit_text("❌ Invalid session string.")
         await start_command(update, context)
@@ -229,7 +236,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 **Bot Status**\n\n"
         f"**Management Bot:** Online\n"
         f"**Source Chat:** `{source_chat}`\n"
-        f"**Target Chat:** `{target_chat}`\n"
+        f"**Target Chat:** `{escape_markdown_v2(target_chat)}`\n"
         f"**Userbots Running:** {running_bots}/{total_bots}\n"
         f"**Paused Forwarding:** {len(paused_forwarding)} bots\n"
         f"**Paused Notifications:** {len(paused_notifications)} bots"
@@ -305,7 +312,6 @@ async def health_check_server():
 
 # --- Main Application Runner with Leader Election ---
 async def run_bot_as_leader(application: Application):
-    """The main logic for the leader process."""
     logger.info("👑 This process is the leader. Starting all services.")
     await application.initialize()
     await application.start()
@@ -315,7 +321,6 @@ async def run_bot_as_leader(application: Application):
         await asyncio.sleep(3600)
 
 async def main():
-    """Initializes and runs the bot using a leader election model."""
     host, port = "0.0.0.0", int(os.getenv("PORT", 8080))
     server = None
     try:
