@@ -388,16 +388,43 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action cancelled.")
     return ConversationHandler.END
 
-# --- Health Check Server & Main Runner ---
-async def main():
+# --- Independent Commands ---
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_time = datetime.now()
+    message = await update.message.reply_text("Pinging...")
+    end_time = datetime.now()
+    latency = (end_time - start_time).microseconds / 1000
+    await message.edit_text(f"🏓 Pong!\nLatency: {latency:.2f} ms")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source_chat = await get_source_chat()
+    target_chat = await get_target_chat() or "Not Set"
+    running_bots = len(active_userbots)
+    total_bots = accounts_collection.count_documents({})
+    status_text = (f"📊 <b>Bot Status</b>\n\n"
+        f"<b>Management Bot:</b> Online\n"
+        f"<b>Source Chat:</b> <code>{source_chat}</code>\n"
+        f"<b>Target Chat:</b> <code>{escape_html(target_chat)}</code>\n"
+        f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n")
+    await update.message.reply_html(status_text)
+    
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Stopping all userbots...")
+    for uid, client in list(active_userbots.items()):
+        await client.stop()
+        del active_userbots[uid]
+    await msg.edit_text("🔄 Restarting and refreshing details...")
+    started, total = await start_all_userbots_from_db(context.application, update_info=True)
+    await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
+
+# --- Main Application Runner ---
+def main():
+    """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Conversation Handlers
     gen_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query.message, c), pattern="^call_generate$")
-        ],
+        entry_points=[CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command))],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
@@ -444,12 +471,13 @@ async def main():
     application.add_handler(add_multiple_conv)
 
     # Callback Handlers
+    application.add_handler(CallbackQueryHandler(lambda u,c: generate_command(u.callback_query.message, c), pattern="^call_generate$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
 
     logger.info("Bot is starting...")
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
