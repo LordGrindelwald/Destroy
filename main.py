@@ -418,7 +418,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard = [[InlineKeyboardButton("🤫 Also Pause Notifications (5 min)", callback_data=f"pause_notify_{uid}")]]
         await update.message.reply_html(f"⏸️ Forwarding paused for <code>{uid}</code> for 5 minutes.", reply_markup=InlineKeyboardMarkup(keyboard))
     except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /temp <userbot_user_id>")
+        await update.message.reply_text("Usage: /temp &lt;userbot_user_id&gt;")
 
 async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -432,18 +432,30 @@ async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": uid}, name=f"unpause_notify_{uid}")
         await update.message.reply_html(f"🤫 Silent pause enabled for <code>{uid}</code> for 5 minutes.")
     except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /temp_fwd <userbot_user_id>")
+        await update.message.reply_text("Usage: /temp_fwd &lt;userbot_user_id&gt;")
 
+# THIS IS THE CORRECTED FUNCTION
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     uid = int(query.data.split("_")[2])
+    
+    # Give immediate pop-up feedback
+    await query.answer(text="Notifications will be paused.")
+    
     if uid not in active_userbots:
         await query.edit_message_text("This userbot is no longer active.", reply_markup=None)
         return
+        
     paused_notifications.add(uid)
     context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": uid}, name=f"unpause_notify_{uid}")
-    await query.edit_message_html(f"🤫 Notifications now also paused for <code>{uid}</code> for 5 minutes.", reply_markup=None)
+    
+    # Update the original message to reflect the new state
+    updated_text = (
+        f"⏸️ Forwarding is paused for <code>{uid}</code> for 5 minutes.\n\n"
+        f"<b>✅ Update:</b> Notifications are now also paused."
+    )
+    await query.edit_message_html(updated_text, reply_markup=None)
+
 
 # --- Health Check Server for Koyeb ---
 async def health_check_server():
