@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
-    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
+    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
+    UserBannedInDcError
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -89,7 +90,6 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
     source_chat_id = await get_source_chat()
     if message.chat.id == source_chat_id:
         try:
-            await client.read_history(chat_id=source_chat_id)
             target_chat = await get_target_chat()
             is_forwarding_paused = client.me.id in paused_forwarding
             if not is_forwarding_paused:
@@ -108,38 +108,50 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
             await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
+    """Initializes, starts, and stores a single Pyrogram userbot client."""
     client = PyrogramClient(
         name=f"userbot_{len(active_userbots)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
         device_model=generate_device_name(),
         system_version="Telegram Desktop 5.8.2 x64",
         app_version="5.8.2",
-        lang_code="en"
-        # REMOVED: system_lang_code is not supported in all versions
+        lang_code="en",
+        system_lang_code="en"
     )
     try:
         await client.start()
+
+        # After connecting, try to get user info. This is where the restriction error can happen.
         me = await client.get_me()
+
         if me.id in active_userbots:
             await client.stop()
             return "already_exists", None
+
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         client.add_handler(PyrogramMessageHandler(handler_with_context))
+        
         active_userbots[me.id] = {"client": client, "task": asyncio.current_task()}
+        
         if update_info:
             account_info = {
                 "user_id": me.id, "first_name": me.first_name, "username": me.username,
                 "phone_number": me.phone_number, "session_string": session_string,
             }
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
+        
         return "success", me
+
+    except UserBannedInDcError:
+        logger.error("Login successful, but account is restricted and cannot fetch its own details.")
+        await client.stop()
+        return "account_restricted", None
     except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
         return "invalid_session", None
     except Exception as e:
-        logger.error(f"An unexpected error in start_userbot: {e}")
-        if "AUTH_KEY_PERM_EMPTY" in str(e):
-             return "account_restricted", None
-        if client.is_connected: await client.stop()
+        logger.error(f"An unexpected error occurred in start_userbot: {e}")
+        if client.is_connected:
+            await client.stop()
         return "error", None
 
 async def start_all_userbots_from_db(application: Application, update_info: bool = False):
@@ -177,11 +189,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
     target_chat = await get_target_chat() or "Not Set"
-    message_text = (
-        f"⚙️ <b>Settings Dashboard</b>\n\n"
-        f"▶️ <b>Source:</b> <code>{source_chat_id}</code>\n"
-        f"🎯 <b>Target:</b> <code>{escape_html(target_chat)}</code>"
-    )
+    message_text = (f"⚙️ <b>Settings Dashboard</b>\n\n▶️ <b>Source:</b> <code>{source_chat_id}</code>\n🎯 <b>Target:</b> <code>{escape_html(target_chat)}</code>")
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     else:
@@ -277,6 +285,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
+    # Session generation logic
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
         if step == 'awaiting_phone_number':
             phone = update.message.text
@@ -287,7 +296,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 device_model=generate_device_name(),
                 system_version="Telegram Desktop 5.8.2 x64",
                 app_version="5.8.2",
-                lang_code="en"
+                lang_code="en",
+                system_lang_code="en"
             )
             context.user_data['temp_client'] = client
             try:
@@ -305,7 +315,9 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         client = context.user_data.get('temp_client')
-        if not client: context.user_data.clear(); return
+        if not client:
+            context.user_data.clear()
+            return
 
         if step == 'awaiting_login_code':
             code = update.message.text
