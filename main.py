@@ -71,8 +71,8 @@ def escape_html(text: str) -> str:
 def generate_device_name():
     """Generates a realistic device name from a predefined list."""
     device_names = [
-        "MSI-B550-GAMING-PLUS", "ASUS-ROG-STRIX-Z690-E", "GIGABYTE-AORUS-MASTER",
-        "DELL-XPS-DESKTOP", "HP-PAVILION-GAMING", "LENOVO-LEGION-TOWER", "ALIENWARE-AURORA-R13"
+        "MSI B550", "Asus ROG Strix Z690E", "Gigabyte Aorus Master",
+        "XPS Desktop", "Hp Pavilion Plus", "Lenovo Legion Tower", "Aurora R13"
     ]
     suffix = ''.join(random.choices(string.digits, k=4))
     return f"{random.choice(device_names)}-{suffix}"
