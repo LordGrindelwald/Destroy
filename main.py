@@ -32,6 +32,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -59,6 +60,8 @@ active_userbots = {}
 paused_forwarding = set()
 paused_notifications = set()
 
+# --- State definitions for ConversationHandler ---
+PHONE, CODE, PASSWORD = range(3)
 
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
@@ -148,8 +151,7 @@ async def get_target_chat():
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
-        if update.message: await update.message.reply_text("⛔️ You are not authorized.")
-        elif update.callback_query: await update.callback_query.answer("⛔️ You are not authorized.", show_alert=True)
+        await update.message.reply_text("⛔️ You are not authorized.")
         return
     await command_handler(update, context)
 
@@ -250,7 +252,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # Session generation logic is handled by its own ConversationHandler now
+    # Session generation is handled by ConversationHandler, so we ignore those states here
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
         return
 
@@ -429,15 +431,15 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
 
 # --- Main Application Runner ---
-def main():
-    """Initializes and runs the bot."""
+async def main():
+    """Initializes and runs all bot components."""
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Conversation handler for the session generator
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u, c: owner_only(u.callback_query, c, generate_command), pattern="^call_generate$")
+            CallbackQueryHandler(lambda u,c: generate_command(u, c), pattern="^call_generate$")
         ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
@@ -458,11 +460,13 @@ def main():
     application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
     application.add_handler(gen_conv)
 
-    # Callback Handlers
+    # Callback Handlers for simple state setting
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please paste the session string."), pattern="^add_single$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please paste all session strings."), pattern="^add_multiple$"))
+
+    # Other Callback Handlers
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
@@ -471,7 +475,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     logger.info("Bot is starting...")
-    application.run_polling()
+    await application.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
