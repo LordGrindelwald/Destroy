@@ -132,12 +132,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📚 Set Source", callback_data="set_source")],
         [InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
-        [InlineKeyboardButton("ģ Generate Session", callback_data="generate_session")], # NEW
+        [InlineKeyboardButton("ģ Generate Session", callback_data="generate_session")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
     target_chat = await get_target_chat() or "Not Set"
-    message_text = (f"👋 **Welcome\!**\n\n▶️ **Source:** `{source_chat_id}`\n🎯 **Target:** `{escape_markdown_v2(target_chat)}`")
+    message_text = (
+        f"👋 **Welcome\!**\n\n"
+        f"▶️ **Source:** `{source_chat_id}`\n"
+        f"🎯 **Target:** `{escape_markdown_v2(target_chat)}`"
+    )
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
     else:
@@ -166,7 +170,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # --- Session Generation Logic ---
     if step == 'awaiting_phone_number':
         phone = update.message.text
         context.user_data['phone'] = phone
@@ -184,8 +187,9 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ **An unexpected error occurred:** {e}. Process cancelled.")
             context.user_data.clear()
+        return
 
-    elif step == 'awaiting_login_code':
+    if step == 'awaiting_login_code':
         code = update.message.text
         client = context.user_data['temp_client']
         phone = context.user_data['phone']
@@ -206,9 +210,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.disconnect()
             context.user_data.clear()
         finally:
-             await update.message.delete() # Delete the message with the code for security
+             await update.message.delete()
+        return
 
-    elif step == 'awaiting_2fa_password':
+    if step == 'awaiting_2fa_password':
         password = update.message.text
         client = context.user_data['temp_client']
         try:
@@ -224,10 +229,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.disconnect()
             context.user_data.clear()
         finally:
-            await update.message.delete() # Delete the message with the password
+            await update.message.delete()
+        return
 
-    # --- Other Input Logic ---
-    elif step == 'awaiting_source':
+    del context.user_data['next_step']
+    if step == 'awaiting_source':
         try:
             chat_id = int(update.message.text)
             config_collection.update_one({"_id": "config"}, {"$set": {"source_chat_id": chat_id}}, upsert=True)
@@ -265,7 +271,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_command(update, context)
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'next_step' in context.user_data: del context.user_data['next_step']
     if 'temp_client' in context.user_data:
         client = context.user_data['temp_client']
         if client.is_connected: await client.disconnect()
@@ -273,64 +278,165 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action cancelled.")
     await start_command(update, context)
 
-# --- Independent Commands ---
+# --- Session Generator Handlers ---
 async def generate_session_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Starts the session generation process."""
-    # This is a callback query handler, so we get the query object
     query = update.callback_query
     await query.answer()
     context.user_data['next_step'] = 'awaiting_phone_number'
-    await query.edit_message_text(
-        "Starting session generator...\n\nPlease send me the phone number of the account you want to add (e.g., +1234567890)."
-    )
+    await query.edit_message_text("Starting session generator...\n\nPlease send the phone number in international format (e.g., +1234567890).")
 
 async def add_generated_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback to add the last generated session string."""
     query = update.callback_query
     await query.answer()
-    session_string = context.user_data.get('last_generated_session')
+    # Find the session string from the message text itself.
+    if not query.message or not query.message.text: return
+    session_string = query.message.text.split("`")[-2] # Extracts string from between backticks
+
     if not session_string:
-        await query.edit_message_text("No session string was found to add.", reply_markup=None)
+        await query.edit_message_text("Could not find session string to add.", reply_markup=None)
         return
 
     await query.edit_message_text("⏳ Adding the new account...", reply_markup=None)
     status, user_info = await start_userbot(session_string, context.application, update_info=True)
-    if status == "success":
-        await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
-    elif status == "already_exists":
-        await query.edit_message_text("⚠️ This account already exists.")
-    else:
-        await query.edit_message_text("❌ An error occurred while adding the account.")
+    if status == "success": await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
+    elif status == "already_exists": await query.edit_message_text("⚠️ This account already exists.")
+    else: await query.edit_message_text("❌ An error occurred.")
     await asyncio.sleep(2)
     await start_command(query, context)
 
+# --- Independent Commands ---
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_time = datetime.now()
+    message = await update.message.reply_text("Pinging...")
+    end_time = datetime.now()
+    latency = (end_time - start_time).microseconds / 1000
+    await message.edit_text(f"🏓 Pong!\nLatency: {latency:.2f} ms")
 
-async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Full function omitted for brevity
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Full function omitted for brevity
-async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Full function omitted for brevity
-async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Full function omitted for brevity
-async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Full function omitted for brevity
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source_chat = await get_source_chat()
+    target_chat = await get_target_chat() or "Not Set"
+    running_bots = len(active_userbots)
+    total_bots = accounts_collection.count_documents({})
+    status_text = (f"📊 **Bot Status**\n\n**Management Bot:** Online\n**Source Chat:** `{source_chat}`\n**Target Chat:** `{escape_markdown_v2(target_chat)}`\n**Userbots Running:** {running_bots}/{total_bots}\n**Paused Forwarding:** {len(paused_forwarding)} bots\n**Paused Notifications:** {len(paused_notifications)} bots")
+    await update.message.reply_markdown_v2(status_text)
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Stopping all userbots...")
+    for user_id, data in list(active_userbots.items()):
+        await data["client"].stop()
+        del active_userbots[user_id]
+    await msg.edit_text("🔄 Restarting and refreshing account details...")
+    started, total = await start_all_userbots_from_db(context.application, update_info=True)
+    await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
+
+async def unpause_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data["user_id"]
+    if user_id in paused_forwarding:
+        paused_forwarding.remove(user_id)
+        await context.bot.send_message(OWNER_ID, f"▶️ Forwarding automatically resumed for `{user_id}`.", parse_mode=ParseMode.MARKDOWN_V2)
+
+async def unpause_notifications_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data["user_id"]
+    if user_id in paused_notifications:
+        paused_notifications.remove(user_id)
+        await context.bot.send_message(OWNER_ID, f"🔔 Notifications automatically resumed for `{user_id}`.", parse_mode=ParseMode.MARKDOWN_V2)
+
+async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id_to_pause = int(context.args[0])
+        if user_id_to_pause not in active_userbots:
+            await update.message.reply_text("❌ User ID not found.")
+            return
+        paused_forwarding.add(user_id_to_pause)
+        context.job_queue.run_once(unpause_forwarding_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_fwd_{user_id_to_pause}")
+        keyboard = [[InlineKeyboardButton("🤫 Also Pause Notifications (5 min)", callback_data=f"pause_notify_{user_id_to_pause}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(f"⏸️ Forwarding paused for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: `/temp <userbot_user_id>`")
+
+async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id_to_pause = int(context.args[0])
+        if user_id_to_pause not in active_userbots:
+            await update.message.reply_text("❌ User ID not found.")
+            return
+        paused_forwarding.add(user_id_to_pause)
+        paused_notifications.add(user_id_to_pause)
+        context.job_queue.run_once(unpause_forwarding_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_fwd_{user_id_to_pause}")
+        context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_notify_{user_id_to_pause}")
+        await update.message.reply_text(f"🤫 Silent pause enabled for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2)
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: `/temp_fwd <userbot_user_id>`")
+
+async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id_to_pause = int(query.data.split("_")[2])
+    if user_id_to_pause not in active_userbots:
+        await query.edit_message_text("This userbot is no longer active.", reply_markup=None)
+        return
+    paused_notifications.add(user_id_to_pause)
+    context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_notify_{user_id_to_pause}")
+    await query.edit_message_text(f"🤫 Notifications now also paused for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+
+# --- Health Check Server for Koyeb ---
+async def health_check_server():
+    host, port = "0.0.0.0", int(os.getenv("PORT", 8080))
+    server = await asyncio.start_server(lambda r, w: w.close(), host, port)
+    logger.info(f"Health check server started on port {port}")
+    async with server: await server.serve_forever()
 
 # --- Main Application Runner with Leader Election ---
+async def run_bot_as_leader(application: Application):
+    logger.info("👑 This process is the leader. Starting all services.")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    await start_all_userbots_from_db(application)
+    while True:
+        await asyncio.sleep(3600)
+
 async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    host, port = "0.0.0.0", int(os.getenv("PORT", 8080))
+    server = None
+    try:
+        server = await asyncio.start_server(lambda r, w: w.close(), host, port)
+        application = Application.builder().token(BOT_TOKEN).build()
 
-    # Add all command handlers
-    application.add_handler(CommandHandler("start", lambda u, c: owner_only(u, c, start_command)))
-    application.add_handler(CommandHandler("cancel", lambda u, c: owner_only(u, c, cancel_command)))
-    application.add_handler(CommandHandler("ping", ping_command))
-    application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
-    #... and so on for all other commands
+        # Command handlers
+        application.add_handler(CommandHandler("start", lambda u, c: owner_only(u, c, start_command)))
+        application.add_handler(CommandHandler("cancel", lambda u, c: owner_only(u, c, cancel_command)))
+        application.add_handler(CommandHandler("ping", ping_command))
+        application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
+        application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
+        application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
+        application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
 
-    # Add all callback handlers
-    application.add_handler(CallbackQueryHandler(generate_session_command, pattern="^generate_session$"))
-    application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session$"))
-    #... and so on for all other buttons
+        # Callback handlers for buttons
+        application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
+        application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
+        application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
+        application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please send the session string."), pattern="^add_single$"))
+        application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please send all session strings."), pattern="^add_multiple$"))
+        application.add_handler(CallbackQueryHandler(lambda u,c: start_command(u,c), pattern="^main_menu$"))
+        application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
+        application.add_handler(CallbackQueryHandler(generate_session_command, pattern="^generate_session$"))
+        application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session$"))
 
-    # The main text handler for state-based inputs
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
-    # The rest of the main function...
-    
+        # The text handler that processes replies based on the state
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+
+        await run_bot_as_leader(application)
+    except OSError:
+        logger.info(f"Port {port} in use. This is a follower process, staying idle.")
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        if server:
+            server.close()
+            await server.wait_closed()
+
 if __name__ == "__main__":
-    pass
+    asyncio.run(main())
