@@ -1,0 +1,36 @@
+# This file tells Koyeb exactly how to run your application.
+name: userbot-manager-app
+services:
+  - name: userbot-worker
+    # This defines the service as a background worker on the free "nano" plan.
+    instance_type: nano
+    git:
+      branch: main # Or master, depending on your repository
+      repo: LordGrindelwald/destroy # Important: Change this!
+    
+    # The command to start your application.
+    run_command: python main.py
+
+    # This is the crucial part: it explicitly defines the TCP health check.
+    health_checks:
+      - type: tcp
+        port: 8080 # This matches the default port in our python code.
+
+    # This tells the service to use the environment variables 
+    # you set in the Koyeb dashboard.
+    env:
+      - key: BOT_TOKEN
+        scope: secret
+        value: bot-token # The 'value' here is a reference name, not the actual secret.
+      - key: MONGO_URI
+        scope: secret
+        value: mongo-uri
+      - key: OWNER_ID
+        scope: secret
+        value: owner-id
+      - key: API_ID
+        scope: secret
+        value: api-id
+      - key: API_HASH
+        scope: secret
+        value: api-hash
