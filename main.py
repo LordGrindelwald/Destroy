@@ -6,11 +6,12 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Version 2.0 - Reworked with HTML)
+#          (Definitive Version with All Fixes)
 
 import os
 import asyncio
 import logging
+import random
 from datetime import datetime
 from functools import partial
 from pymongo import MongoClient
@@ -75,11 +76,12 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
     source_chat_id = await get_source_chat()
     if message.chat.id == source_chat_id:
         try:
+            await client.read_history(chat_id=source_chat_id)
             target_chat = await get_target_chat()
             is_forwarding_paused = client.me.id in paused_forwarding
             if not is_forwarding_paused:
                 if target_chat:
-                    if os.urandom(1)[0] % 10 < 9: await message.forward(chat_id=target_chat)
+                    if random.random() < 0.90: await message.forward(chat_id=target_chat)
                     else: await message.copy(chat_id=target_chat)
                     status_text = "✅ Forwarded"
                 else: status_text = "⚠️ Not Forwarded (No Target Set)"
@@ -178,11 +180,69 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
+async def remove_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    accounts = list(accounts_collection.find())
+    if not accounts:
+        await update.message.reply_html("There are no accounts to remove.")
+        return
+    keyboard = []
+    for acc in accounts:
+        user_id = acc.get('user_id')
+        name = escape_html(acc.get('first_name', f"ID: {user_id}"))
+        button = [InlineKeyboardButton(f"🗑️ {name}", callback_data=f"delete_account_{user_id}")]
+        keyboard.append(button)
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="main_settings")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_html("Please select an account to remove:", reply_markup=reply_markup)
+
+async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id_to_delete = int(query.data.split("_")[2])
+    if user_id_to_delete in active_userbots:
+        logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
+        await active_userbots[user_id_to_delete]["client"].stop()
+        del active_userbots[user_id_to_delete]
+    result = accounts_collection.delete_one({"user_id": user_id_to_delete})
+    if result.deleted_count > 0:
+        await query.edit_message_text(f"✅ Account <code>{user_id_to_delete}</code> has been successfully removed.", parse_mode=ParseMode.HTML)
+    else:
+        await query.edit_message_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
+    await asyncio.sleep(3)
+    await settings_command(update, context)
+
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
     query = update.callback_query
     await query.answer()
     context.user_data['next_step'] = step
     await query.edit_message_text(text)
+
+async def ask_for_source_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['next_step'] = 'awaiting_source'
+    prompt_text = "Please send the source chat ID."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(prompt_text)
+    else:
+        await update.message.reply_text(prompt_text)
+
+async def ask_for_target_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['next_step'] = 'awaiting_target'
+    prompt_text = "Please send the target bot username."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(prompt_text)
+    else:
+        await update.message.reply_text(prompt_text)
+
+async def ask_to_generate_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['next_step'] = 'awaiting_phone_number'
+    prompt_text = "Starting session generator...\n\nPlease send the phone number in international format (e.g., +1234567890)."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(prompt_text)
+    else:
+        await update.message.reply_text(prompt_text)
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
@@ -294,29 +354,15 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Action cancelled.")
 
-# --- Session Generator Handlers ---
-async def ask_to_generate_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['next_step'] = 'awaiting_phone_number'
-    prompt_text = "Starting session generator...\n\nPlease send the phone number in international format (e.g., +1234567890)."
-    if query:
-        await query.answer()
-        await query.edit_message_text(prompt_text)
-    else:
-        await update.message.reply_text(prompt_text)
-
 async def add_generated_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_string = query.data.split(":", 1)[1]
-    
     await query.edit_message_text("⏳ Adding the new account...", reply_markup=None)
     status, user_info = await start_userbot(session_string, context.application, update_info=True)
-    
     if status == "success": await query.edit_message_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
     elif status == "already_exists": await query.edit_message_text("⚠️ This account already exists.")
     else: await query.edit_message_text("❌ An error occurred.")
-    
     await asyncio.sleep(3)
     await settings_command(update, context)
 
@@ -427,6 +473,7 @@ async def main():
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
         application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
+        application.add_handler(CommandHandler("remove", lambda u, c: owner_only(u, c, remove_account_menu)))
         application.add_handler(CommandHandler("cancel", lambda u, c: owner_only(u, c, cancel_command)))
         application.add_handler(CommandHandler("ping", ping_command))
         application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
@@ -445,6 +492,7 @@ async def main():
         application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
         application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
         application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session:"))
+        application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
 
         # The text handler that processes replies based on the state
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
