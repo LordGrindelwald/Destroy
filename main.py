@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version with All Fixes)
+#          (Definitive Version with Full Fingerprint)
 
 import os
 import asyncio
@@ -64,19 +64,12 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# MODIFIED: This function now uses a list of real device/motherboard names.
 def generate_device_name():
-    """Generates a realistic device name from a predefined list."""
-    device_names = [
-        "MSI-B550-GAMING-PLUS", "ASUS-ROG-STRIX-Z690-E", "GIGABYTE-AORUS-MASTER",
-        "DELL-XPS-DESKTOP", "HP-PAVILION-GAMING", "LENOVO-LEGION-TOWER",
-        "ALIENWARE-AURORA-R13", "NZXT-STREAMER-PC", "CYBERPOWER-GAMER-XTREME",
-        "IBUYPOWER-PRO", "ASROCK-STEEL-LEGEND", "RAZER-BLADE-STEALTH",
-        "SURFACE-STUDIO", "MACBOOK-PRO-16", "THINKCENTRE-M90"
-    ]
-    # Optionally add a random suffix to make it more unique
-    suffix = ''.join(random.choices(string.digits, k=4))
-    return f"{random.choice(device_names)}-{suffix}"
+    """Generates a realistic, random computer name."""
+    prefixes = ["DESKTOP", "LAPTOP", "WORKSTATION", "PC", "COMPUTER", "SYSTEM"]
+    prefix = random.choice(prefixes)
+    suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+    return f"{prefix}-{suffix}"
 
 # --- Userbot Core Logic ---
 async def get_source_chat():
@@ -115,8 +108,10 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
         name=f"userbot_{len(active_userbots)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
         device_model=generate_device_name(),
-        system_version="Windows 11 Pro", # A common OS version
-        app_version="4.8.3" # A recent Telegram Desktop version
+        system_version="Telegram Desktop 5.8.2 x64",
+        app_version="5.8.2",
+        lang_code="en",
+        system_lang_code="en"
     )
     try:
         await client.start()
@@ -288,8 +283,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name=f"generator_{update.effective_user.id}",
                 api_id=API_ID, api_hash=API_HASH, in_memory=True,
                 device_model=generate_device_name(),
-                system_version="Windows 11 Pro",
-                app_version="4.8.3"
+                system_version="Telegram Desktop 5.8.2 x64",
+                app_version="5.8.2",
+                lang_code="en",
+                system_lang_code="en"
             )
             context.user_data['temp_client'] = client
             try:
