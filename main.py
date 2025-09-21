@@ -154,7 +154,10 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     accounts = list(accounts_collection.find())
-    text = "👤 **Your Managed Accounts:**\n\n" if accounts else "No accounts have been added yet."
+    
+    # CORRECTED: The period in the default message must be escaped.
+    text = "👤 **Your Managed Accounts:**\n\n" if accounts else "No accounts have been added yet\\."
+
     for acc in accounts:
         first_name = escape_markdown_v2(acc.get('first_name', 'N/A'))
         separator = '-'*20
