@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Worker Version with TCP Health Check)
+#          (Final Version with Leader Election)
 
 import os
 import asyncio
@@ -221,7 +221,7 @@ async def set_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid ID. Please send a numerical chat ID.")
     
-    await start_command(update, context)
+    await start_command(update.message, context)
     return ConversationHandler.END
 
 async def ask_for_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,7 +238,7 @@ async def set_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Invalid username. It must start with '@'.")
     
-    await start_command(update, context)
+    await start_command(update.message, context)
     return ConversationHandler.END
 
 async def ask_for_single_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,7 +259,7 @@ async def add_single_account(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.edit_text("❌ Authentication failed. The session string is invalid or has expired.")
     else:
         await msg.edit_text("❌ An unexpected error occurred. Please check the logs.")
-    await start_command(update, context)
+    await start_command(update.message, context)
     return ConversationHandler.END
 
 async def ask_for_multiple_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,7 +274,7 @@ async def add_multiple_accounts(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not session_strings:
         await update.message.reply_text("No session strings found in your message.")
-        await start_command(update, context)
+        await start_command(update.message, context)
         return ConversationHandler.END
 
     msg = await update.message.reply_text(f"Found {len(session_strings)} session strings. Processing them now...")
@@ -288,19 +288,17 @@ async def add_multiple_accounts(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             failure_count += 1
     await msg.edit_text(f"Batch process complete!\n\n✅ Successfully added: {success_count}\n❌ Failed or already exists: {failure_count}")
-    await start_command(update, context)
+    await start_command(update.message, context)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operation cancelled.")
-    await start_command(update, context)
+    await start_command(update.message, context)
     return ConversationHandler.END
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # To properly redraw the menu, we can't use start_command directly from a query
-    # So we get the effective_chat object and call start_command with it.
     await start_command(query.message, context)
     return SELECTING_ACTION
 
@@ -410,74 +408,81 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
         reply_markup=None
     )
 
-# --- Health Check Server for Koyeb ---
-async def health_check_server():
-    """A simple TCP server to respond to Koyeb's health checks."""
+
+# --- Main Application Runner with Leader Election ---
+async def run_bot_as_leader(application: Application):
+    """The main logic for the leader process."""
+    logger.info("👑 This process is the leader. Starting all services.")
+    
+    # Start the PTB application for polling
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    # Start the userbots from the database
+    await start_all_userbots_from_db(application)
+    
+    # We need a never-ending task to keep the process alive
+    while True:
+        await asyncio.sleep(3600)
+
+async def main():
+    """Initializes and runs the bot using a leader election model."""
     host = "0.0.0.0"
     port = int(os.getenv("PORT", 8080))
+    server = None
     
-    async def handle_client(reader, writer):
-        writer.close()
-        await writer.wait_closed()
+    try:
+        # Try to bind to the health check port.
+        server = await asyncio.start_server(lambda r, w: w.close(), host, port)
+        logger.info(f"Health check port {port} acquired. This process will be the leader.")
 
-    server = await asyncio.start_server(handle_client, host, port)
-    logger.info(f"Health check server started on port {port}")
-    async with server:
-        await server.serve_forever()
+        # If successful, this process is the leader.
+        application = Application.builder().token(BOT_TOKEN).build()
 
-# --- Main Application Runner ---
-def main():
-    """Initializes and runs the bot, userbots, and health check server."""
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start_command)],
-        states={
-            SELECTING_ACTION: [
-                CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"),
-                CallbackQueryHandler(ask_for_source, pattern="^set_source$"),
-                CallbackQueryHandler(ask_for_target, pattern="^set_target$"),
-                CallbackQueryHandler(ask_for_single_account, pattern="^add_single$"),
-                CallbackQueryHandler(ask_for_multiple_accounts, pattern="^add_multiple$"),
-                CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
-            ],
-            SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source)],
-            SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target)],
-            ADD_SINGLE_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_account)],
-            ADD_MULTIPLE_ACCOUNTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_accounts)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        persistent=False,
-        name="main_conversation"
-    )
-
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("ping", lambda u, c: owner_only(u, c, ping_command)))
-    application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
-    application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
-    application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
-    application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
-    application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
-
-    async def run_all():
-        # Start the PTB application for polling
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-
-        # Start the userbots from the database
-        await start_all_userbots_from_db(application)
-
-        # Start the health check server
-        await health_check_server()
-
-        # Keep everything running
-        await application.updater.stop()
-        await application.stop()
-
-    logger.info("Management bot and all services are starting...")
-    asyncio.run(run_all())
+        # Add all handlers
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start_command)],
+            states={
+                SELECTING_ACTION: [
+                    CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"),
+                    CallbackQueryHandler(ask_for_source, pattern="^set_source$"),
+                    CallbackQueryHandler(ask_for_target, pattern="^set_target$"),
+                    CallbackQueryHandler(ask_for_single_account, pattern="^add_single$"),
+                    CallbackQueryHandler(ask_for_multiple_accounts, pattern="^add_multiple$"),
+                    CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
+                ],
+                SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source)],
+                SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target)],
+                ADD_SINGLE_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_account)],
+                ADD_MULTIPLE_ACCOUNTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_accounts)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+            persistent=False,
+            name="main_conversation"
+        )
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler("ping", lambda u, c: owner_only(u, c, ping_command)))
+        application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
+        application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
+        application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
+        application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
+        application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
+        
+        # Run the leader's tasks
+        await run_bot_as_leader(application)
+        
+    except OSError:
+        # If the port is already in use, this is a follower process.
+        logger.info(f"Health check port {port} is already in use. This process will be a follower and stay idle.")
+        # Keep the follower alive indefinitely without doing any work.
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        if server:
+            server.close()
+            await server.wait_closed()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
