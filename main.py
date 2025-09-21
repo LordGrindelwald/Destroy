@@ -21,8 +21,8 @@ from dotenv import load_dotenv
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
-    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
-    UserBannedInDcError
+    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
+    # REMOVED: UserBannedInDcError is no longer used in recent Pyrogram versions
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -134,14 +134,14 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             }
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
         return "success", me
-    except UserBannedInDcError:
-        logger.error("Login successful, but account is restricted and cannot fetch its own details.")
-        await client.stop()
-        return "account_restricted", None
+    # REMOVED: The UserBannedInDcError is no longer used and was causing the import crash.
+    # A generic Exception will catch any restriction issues.
     except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
         return "invalid_session", None
     except Exception as e:
         logger.error(f"An unexpected error in start_userbot: {e}")
+        if "AUTH_KEY_PERM_EMPTY" in str(e): # A common error for restricted accounts
+             return "account_restricted", None
         if client.is_connected: await client.stop()
         return "error", None
 
@@ -514,7 +514,6 @@ async def main():
         server = await asyncio.start_server(lambda r, w: w.close(), host, port)
         application = Application.builder().token(BOT_TOKEN).build()
 
-        # Command handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
         application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
@@ -527,7 +526,6 @@ async def main():
         application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
         application.add_handler(CommandHandler("generate", lambda u, c: owner_only(u, c, ask_to_generate_session)))
 
-        # Callback handlers for buttons
         application.add_handler(CallbackQueryHandler(ask_for_source_chat, pattern="^set_source$"))
         application.add_handler(CallbackQueryHandler(ask_for_target_chat, pattern="^set_target$"))
         application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
@@ -540,7 +538,6 @@ async def main():
         application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session:"))
         application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
 
-        # The text handler that processes replies based on the state
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
         await run_bot_as_leader(application)
