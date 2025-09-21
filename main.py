@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Final Version with Refactored Conversation Flow)
+#          (Final Version - Complete & Unabridged)
 
 import os
 import asyncio
@@ -55,19 +55,17 @@ active_userbots = {}
 paused_forwarding = set()
 paused_notifications = set()
 
-# --- REFACTORED: ConversationHandler States ---
+# --- ConversationHandler States ---
 (
-    # These states are now entered from the main menu buttons
     MANAGING_ACCOUNTS,
     SET_SOURCE,
     SET_TARGET,
-    # Sub-states for adding accounts
     ADD_SINGLE_ACCOUNT,
     ADD_MULTIPLE_ACCOUNTS,
 ) = range(5)
 
 
-# --- Userbot Core Logic (Unchanged) ---
+# --- Userbot Core Logic ---
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
     return config.get("source_chat_id", 777000)
@@ -137,9 +135,7 @@ async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command
         return
     await command_handler(update, context)
 
-# --- REFACTORED: `/start` is now a simple, standalone command ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main menu keyboard."""
     keyboard = [
         [InlineKeyboardButton("📚 Source Chat", callback_data="set_source")],
         [InlineKeyboardButton("🎯 Target Chat", callback_data="set_target")],
@@ -158,13 +154,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays account list and enters the account management state."""
     query = update.callback_query
     await query.answer()
     accounts = list(accounts_collection.find())
     text = "<b>Your currently managed accounts:</b>\n\n" if accounts else "No accounts have been added yet."
     for acc in accounts:
-        text += (f"👤 <b>Name:</b> {acc.get('first_name', 'N/A')}\n   - <b>ID:</b> <code>{acc.get('user_id', 'N/A')}</code>\n--------------------\n")
+        text += (
+            f"👤 <b>Name:</b> {acc.get('first_name', 'N/A')}\n"
+            f"   - <b>Username:</b> @{acc.get('username', 'N/A')}\n"
+            f"   - <b>Phone:</b> +{acc.get('phone_number', 'N/A')}\n"
+            f"   - <b>ID:</b> <code>{acc.get('user_id', 'N/A')}</code>\n"
+            f"--------------------\n"
+        )
     keyboard = [
         [InlineKeyboardButton("➕ Add Single", callback_data="add_single"), InlineKeyboardButton("➕ Add Multiple", callback_data="add_multiple")],
         [InlineKeyboardButton("« Back to Main Menu", callback_data="main_menu")],
@@ -249,65 +250,158 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ends conversation and shows the main menu."""
     query = update.callback_query
     await query.answer()
     await start_command(query.message, context)
     return ConversationHandler.END
 
 # --- Independent Commands ---
-async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
-async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
-async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
-async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
-# (All independent commands from the full previous version should be pasted here)
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_time = datetime.now()
+    message = await update.message.reply_text("Pinging...")
+    end_time = datetime.now()
+    latency = (end_time - start_time).microseconds / 1000
+    await message.edit_text(f"🏓 Pong!\nLatency: {latency:.2f} ms")
 
-# --- Health Check Server (Unchanged) ---
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source_chat = await get_source_chat()
+    target_chat = await get_target_chat() or "Not Set"
+    running_bots = len(active_userbots)
+    total_bots = accounts_collection.count_documents({})
+    status_text = (
+        f"📊 **Bot Status**\n\n"
+        f"**Management Bot:** Online\n"
+        f"**Source Chat:** `{source_chat}`\n"
+        f"**Target Chat:** `{target_chat}`\n"
+        f"**Userbots Running:** {running_bots}/{total_bots}\n"
+        f"**Paused Forwarding:** {len(paused_forwarding)} bots\n"
+        f"**Paused Notifications:** {len(paused_notifications)} bots"
+    )
+    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN_V2)
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Stopping all userbots...")
+    for user_id, data in list(active_userbots.items()):
+        await data["client"].stop()
+        del active_userbots[user_id]
+    await msg.edit_text("🔄 Restarting and refreshing account details...")
+    started, total = await start_all_userbots_from_db(context.application, update_info=True)
+    await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
+
+async def unpause_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data["user_id"]
+    if user_id in paused_forwarding:
+        paused_forwarding.remove(user_id)
+        await context.bot.send_message(OWNER_ID, f"▶️ Forwarding automatically resumed for `{user_id}`.", parse_mode=ParseMode.MARKDOWN_V2)
+
+async def unpause_notifications_job(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data["user_id"]
+    if user_id in paused_notifications:
+        paused_notifications.remove(user_id)
+        await context.bot.send_message(OWNER_ID, f"🔔 Notifications automatically resumed for `{user_id}`.", parse_mode=ParseMode.MARKDOWN_V2)
+
+async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id_to_pause = int(context.args[0])
+        if user_id_to_pause not in active_userbots:
+            await update.message.reply_text("❌ User ID not found.")
+            return
+        paused_forwarding.add(user_id_to_pause)
+        context.job_queue.run_once(unpause_forwarding_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_fwd_{user_id_to_pause}")
+        keyboard = [[InlineKeyboardButton("🤫 Also Pause Notifications (5 min)", callback_data=f"pause_notify_{user_id_to_pause}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(f"⏸️ Forwarding paused for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: `/temp <userbot_user_id>`")
+
+async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id_to_pause = int(context.args[0])
+        if user_id_to_pause not in active_userbots:
+            await update.message.reply_text("❌ User ID not found.")
+            return
+        paused_forwarding.add(user_id_to_pause)
+        paused_notifications.add(user_id_to_pause)
+        context.job_queue.run_once(unpause_forwarding_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_fwd_{user_id_to_pause}")
+        context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_notify_{user_id_to_pause}")
+        await update.message.reply_text(f"🤫 Silent pause enabled for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2)
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: `/temp_fwd <userbot_user_id>`")
+
+async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id_to_pause = int(query.data.split("_")[2])
+    if user_id_to_pause not in active_userbots:
+        await query.edit_message_text("This userbot is no longer active.", reply_markup=None)
+        return
+    paused_notifications.add(user_id_to_pause)
+    context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": user_id_to_pause}, name=f"unpause_notify_{user_id_to_pause}")
+    await query.edit_message_text(f"🤫 Notifications now also paused for `{user_id_to_pause}` for 5 minutes.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+
+# --- Health Check Server for Koyeb ---
 async def health_check_server():
     host, port = "0.0.0.0", int(os.getenv("PORT", 8080))
     server = await asyncio.start_server(lambda r, w: w.close(), host, port)
     logger.info(f"Health check server started on port {port}")
     async with server: await server.serve_forever()
 
-# --- Main Application Runner with Leader Election (Unchanged) ---
-async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # --- REFACTORED: ConversationHandler starts from button presses ---
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(ask_for_source, pattern="^set_source$"),
-            CallbackQueryHandler(ask_for_target, pattern="^set_target$"),
-            CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"),
-        ],
-        states={
-            SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source)],
-            SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target)],
-            MANAGING_ACCOUNTS: [
-                CallbackQueryHandler(ask_for_single_account, pattern="^add_single$"),
-                CallbackQueryHandler(ask_for_multiple_accounts, pattern="^add_multiple$"),
-                CallbackQueryHandler(main_menu_from_button, pattern="^main_menu$"),
-            ],
-            ADD_SINGLE_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_account)],
-            ADD_MULTIPLE_ACCOUNTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_accounts)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        persistent=False,
-        name="main_conversation"
-    )
+# --- Main Application Runner with Leader Election ---
+async def run_bot_as_leader(application: Application):
+    """The main logic for the leader process."""
+    logger.info("👑 This process is the leader. Starting all services.")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    await start_all_userbots_from_db(application)
+    while True:
+        await asyncio.sleep(3600)
 
-    # Add the standalone start command handler
-    application.add_handler(CommandHandler("start", lambda u, c: owner_only(u, c, start_command)))
-    
-    # Add the conversation handler and other independent commands
-    application.add_handler(conv_handler)
-    # (Add handlers for ping, status, refresh, temp, etc. here)
-    
-    # The rest of the leader election logic is complex and best left as is.
-    # It will correctly run the application and health check server.
-    # ... (The full main() and `run_bot_as_leader` from the previous answer should be here) ...
+async def main():
+    """Initializes and runs the bot using a leader election model."""
+    host, port = "0.0.0.0", int(os.getenv("PORT", 8080))
+    server = None
+    try:
+        server = await asyncio.start_server(lambda r, w: w.close(), host, port)
+        application = Application.builder().token(BOT_TOKEN).build()
+        conv_handler = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(ask_for_source, pattern="^set_source$"),
+                CallbackQueryHandler(ask_for_target, pattern="^set_target$"),
+                CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"),
+            ],
+            states={
+                SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source)],
+                SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target)],
+                MANAGING_ACCOUNTS: [
+                    CallbackQueryHandler(ask_for_single_account, pattern="^add_single$"),
+                    CallbackQueryHandler(ask_for_multiple_accounts, pattern="^add_multiple$"),
+                    CallbackQueryHandler(main_menu_from_button, pattern="^main_menu$"),
+                ],
+                ADD_SINGLE_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_account)],
+                ADD_MULTIPLE_ACCOUNTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_accounts)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+            persistent=False,
+            name="main_conversation"
+        )
+        application.add_handler(CommandHandler("start", lambda u, c: owner_only(u, c, start_command)))
+        application.add_handler(conv_handler)
+        application.add_handler(CommandHandler("ping", lambda u, c: owner_only(u, c, ping_command)))
+        application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
+        application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
+        application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
+        application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
+        application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
+        await run_bot_as_leader(application)
+    except OSError:
+        logger.info(f"Port {port} in use. This is a follower process, staying idle.")
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        if server:
+            server.close()
+            await server.wait_closed()
 
 if __name__ == "__main__":
-    # Ensure the full functions are included before running
-    pass
+    asyncio.run(main())
