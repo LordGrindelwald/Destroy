@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version with All Features)
+#          (Definitive Version with All Fixes)
 
 import os
 import asyncio
@@ -152,8 +152,7 @@ async def get_target_chat():
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
-        if update.message: await update.message.reply_text("⛔️ You are not authorized.")
-        elif update.callback_query: await update.callback_query.answer("⛔️ You are not authorized.", show_alert=True)
+        await update.message.reply_text("⛔️ You are not authorized.")
         return
     await command_handler(update, context)
 
@@ -273,6 +272,20 @@ async def add_single_from_input(update: Update, context: ContextTypes.DEFAULT_TY
     await asyncio.sleep(2)
     await add_command(update, context)
     return ConversationHandler.END
+    
+async def add_multiple_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    session_strings = [s.strip() for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
+    msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
+    success, fail = 0, 0
+    for session in session_strings:
+        status, _ = await start_userbot(session, context.application, update_info=True)
+        if status == "success": success += 1
+        else: fail += 1
+    await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
+    await asyncio.sleep(2)
+    await add_command(update, context)
+    return ConversationHandler.END
 
 # --- Session Generator Rework ---
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,12 +336,50 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (function is complete and unchanged)
-    pass
+    code = update.message.text
+    client = context.user_data['temp_client']
+    phone = context.user_data['phone']
+    phone_code_hash = context.user_data['phone_code_hash']
+    await update.message.reply_text("⏳ Signing in...")
+    try:
+        await client.sign_in(phone, phone_code_hash, code)
+        session_string = await client.export_session_string()
+        await client.disconnect()
+        await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>")
+        return ConversationHandler.END
+    except SessionPasswordNeeded:
+        await update.message.reply_text("2FA is enabled. Please send your password.")
+        return PASSWORD
+    except (PhoneCodeInvalid, PhoneCodeExpired):
+        await update.message.reply_html("❌ <b>Error:</b> Invalid or expired code. Cancelled.")
+        if client.is_connected: await client.disconnect()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error during login code stage: {e}")
+        await update.message.reply_html(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        if client.is_connected: await client.disconnect()
+        return ConversationHandler.END
+    finally:
+        await update.message.delete()
 
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (function is complete and unchanged)
-    pass
+    password = update.message.text
+    client = context.user_data['temp_client']
+    await update.message.reply_text("⏳ Checking password...")
+    try:
+        await client.check_password(password)
+        session_string = await client.export_session_string()
+        await client.disconnect()
+        await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>")
+    except PasswordHashInvalid:
+        await update.message.reply_html("❌ <b>Error:</b> Incorrect password. Cancelled.")
+    except Exception as e:
+        logger.error(f"Error during 2FA stage: {e}")
+        await update.message.reply_html(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+    finally:
+        if client.is_connected: await client.disconnect()
+        await update.message.delete()
+    return ConversationHandler.END
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'temp_client' in context.user_data:
@@ -336,18 +387,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if client and client.is_connected: await client.disconnect()
     context.user_data.clear()
     await update.message.reply_text("Action cancelled.")
-    # Also end any active conversation
     return ConversationHandler.END
-
-async def add_generated_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (function is complete and unchanged)
-    pass
 
 # --- Health Check Server & Main Runner ---
 async def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # --- Conversation Handlers ---
+    # Conversation Handlers
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
@@ -361,23 +407,50 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel_command)], conversation_timeout=300
     )
     
-    add_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_SINGLE, "Please send the session string."), pattern="^add_single$"),
-        ],
+    source_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, SET_SOURCE, "Please send the source chat ID."), pattern="^set_source$")],
+        states={ SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source_from_input)] },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    target_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, SET_TARGET, "Please send the target bot username."), pattern="^set_target$")],
+        states={ SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target_from_input)] },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
+    add_single_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_SINGLE, "Please send the session string."), pattern="^add_single$")],
         states={ ADD_SINGLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_from_input)] },
         fallbacks=[CommandHandler("cancel", cancel_command)]
     )
+    add_multiple_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_MULTIPLE, "Please send all session strings."), pattern="^add_multiple$")],
+        states={ ADD_MULTIPLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_from_input)] },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
     
-    # Add all other handlers...
+    # Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
     application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
     application.add_handler(CommandHandler("remove", lambda u, c: owner_only(u, c, remove_account_menu)))
-    application.add_handler(add_conv)
+    application.add_handler(CommandHandler("ping", ping_command))
+    application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
+    application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
+    
+    # Add Conversations to Application
     application.add_handler(gen_conv)
+    application.add_handler(source_conv)
+    application.add_handler(target_conv)
+    application.add_handler(add_single_conv)
+    application.add_handler(add_multiple_conv)
 
-    # ... The rest of the main function with leader election logic ...
+    # Callback Handlers
+    application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
+    application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
+    application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
+
+    logger.info("Bot is starting...")
+    await application.run_polling()
 
 if __name__ == "__main__":
-    pass
+    asyncio.run(main())
