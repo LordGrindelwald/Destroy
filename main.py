@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Final Version with Session Generator)
+#          (Definitive Version with All Fixes)
 
 import os
 import asyncio
@@ -36,7 +36,9 @@ from telegram.constants import ParseMode
 
 # --- Basic Setup & Configuration ---
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -201,13 +203,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['last_generated_session'] = session_string
             keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data="add_generated_session")]]
             await update.message.reply_text(f"✅ **Success!** Here is your session string:\n\n`{session_string}`", reply_markup=InlineKeyboardMarkup(keyboard))
-            context.user_data.clear()
         except SessionPasswordNeeded:
             context.user_data['next_step'] = 'awaiting_2fa_password'
             await update.message.reply_text("Your account has Two-Factor Authentication enabled. Please send your password.")
         except (PhoneCodeInvalid, PhoneCodeExpired):
             await update.message.reply_text("❌ **Error:** The login code is invalid or has expired. Process cancelled.")
-            await client.disconnect()
+            if client.is_connected: await client.disconnect()
             context.user_data.clear()
         finally:
              await update.message.delete()
@@ -223,16 +224,17 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['last_generated_session'] = session_string
             keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data="add_generated_session")]]
             await update.message.reply_text(f"✅ **Success!** Here is your session string:\n\n`{session_string}`", reply_markup=InlineKeyboardMarkup(keyboard))
-            context.user_data.clear()
         except PasswordHashInvalid:
             await update.message.reply_text("❌ **Error:** The password is incorrect. Process cancelled.")
-            await client.disconnect()
+            if client.is_connected: await client.disconnect()
             context.user_data.clear()
         finally:
             await update.message.delete()
         return
 
+    # Once a state is handled, clear it.
     del context.user_data['next_step']
+
     if step == 'awaiting_source':
         try:
             chat_id = int(update.message.text)
@@ -288,20 +290,28 @@ async def generate_session_command(update: Update, context: ContextTypes.DEFAULT
 async def add_generated_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Find the session string from the message text itself.
-    if not query.message or not query.message.text: return
-    session_string = query.message.text.split("`")[-2] # Extracts string from between backticks
-
+    session_string = context.user_data.get('last_generated_session')
+    
     if not session_string:
-        await query.edit_message_text("Could not find session string to add.", reply_markup=None)
+        await query.edit_message_text("Could not find a recently generated session string to add. Please try generating a new one.", reply_markup=None)
+        await asyncio.sleep(3)
+        await start_command(query, context)
         return
 
     await query.edit_message_text("⏳ Adding the new account...", reply_markup=None)
     status, user_info = await start_userbot(session_string, context.application, update_info=True)
-    if status == "success": await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
-    elif status == "already_exists": await query.edit_message_text("⚠️ This account already exists.")
-    else: await query.edit_message_text("❌ An error occurred.")
-    await asyncio.sleep(2)
+    
+    if status == "success":
+        await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
+    elif status == "already_exists":
+        await query.edit_message_text("⚠️ This account already exists.")
+    elif status == "invalid_session":
+        await query.edit_message_text("❌ Error: The new session string was rejected as invalid. This can happen if the session was terminated. Please try generating a new one.")
+    else: # status == "error"
+        await query.edit_message_text("❌ An unexpected internal error occurred. Please check the logs for more details.")
+
+    if 'last_generated_session' in context.user_data: del context.user_data['last_generated_session']
+    await asyncio.sleep(4)
     await start_command(query, context)
 
 # --- Independent Commands ---
@@ -423,7 +433,6 @@ async def main():
         application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
         application.add_handler(CallbackQueryHandler(generate_session_command, pattern="^generate_session$"))
         application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session$"))
-
 
         # The text handler that processes replies based on the state
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
