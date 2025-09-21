@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version with All Fixes)
+#          (Definitive Version v2.2 - Final)
 
 import os
 import asyncio
@@ -287,7 +287,6 @@ async def add_multiple_from_input(update: Update, context: ContextTypes.DEFAULT_
     await add_command(update, context)
     return ConversationHandler.END
 
-# --- Session Generator Rework ---
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
     return PHONE
@@ -395,10 +394,7 @@ async def main():
     
     # Conversation Handlers
     gen_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$")
-        ],
+        entry_points=[CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command))],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
@@ -418,12 +414,12 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel_command)]
     )
     add_single_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_SINGLE, "Please send the session string."), pattern="^add_single$")],
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_SINGLE, "Please paste the session string."), pattern="^add_single$")],
         states={ ADD_SINGLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_from_input)] },
         fallbacks=[CommandHandler("cancel", cancel_command)]
     )
     add_multiple_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_MULTIPLE, "Please send all session strings."), pattern="^add_multiple$")],
+        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_MULTIPLE, "Please paste all session strings."), pattern="^add_multiple$")],
         states={ ADD_MULTIPLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_from_input)] },
         fallbacks=[CommandHandler("cancel", cancel_command)]
     )
@@ -445,6 +441,7 @@ async def main():
     application.add_handler(add_multiple_conv)
 
     # Callback Handlers
+    application.add_handler(CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
