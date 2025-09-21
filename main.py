@@ -157,7 +157,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "👤 **Your Managed Accounts:**\n\n" if accounts else "No accounts have been added yet."
     for acc in accounts:
         first_name = escape_markdown_v2(acc.get('first_name', 'N/A'))
-        # CORRECTED: The separator line should not be escaped.
         separator = '-'*20
         text += f"**Name:** {first_name}\n**ID:** `{acc.get('user_id', 'N/A')}`\n{separator}\n"
     keyboard = [
@@ -225,7 +224,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Independent Commands ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Pong!")
+    start_time = datetime.now()
+    message = await update.message.reply_text("Pinging...")
+    end_time = datetime.now()
+    latency = (end_time - start_time).microseconds / 1000
+    await message.edit_text(f"🏓 Pong!\nLatency: {latency:.2f} ms")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source_chat = await get_source_chat()
