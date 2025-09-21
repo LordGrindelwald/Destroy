@@ -140,10 +140,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
-        [InlineKeyboardButton("📚 Set Source", callback_data="set_source")],
-        [InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
-        [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
-        [InlineKeyboardButton("⚙️ Generate Session", callback_data="generate_session")],
+        [InlineKeyboardButton("📚 Set Source", callback_data="set_source"),
+        InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
+        [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts"),
+        InlineKeyboardButton("⚙️ Generate Session", callback_data="generate_session")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
