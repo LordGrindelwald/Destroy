@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version with All Fixes)
+#          (Definitive Rework v2.3 - All Fixes)
 
 import os
 import asyncio
@@ -32,7 +32,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -60,9 +59,6 @@ active_userbots = {}
 paused_forwarding = set()
 paused_notifications = set()
 
-# --- State definitions for ConversationHandler ---
-PHONE, CODE, PASSWORD, SET_SOURCE, SET_TARGET, ADD_SINGLE, ADD_MULTIPLE = range(7)
-
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
     if not isinstance(text, str): text = str(text)
@@ -81,8 +77,10 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-        device_model=generate_device_name(), system_version="Hexagram 1.7.3",
-        app_version="1.7.3", lang_code="en"
+        device_model=generate_device_name(),
+        system_version="Telegram Desktop 4.8.3",
+        app_version="4.8.3",
+        lang_code="en"
     )
     try:
         await client.start()
@@ -156,16 +154,19 @@ async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command
     await command_handler(update, context)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     await update.message.reply_html(
         "👋 Welcome! I am your userbot forwarder manager.\n\n"
         "Use /settings to configure, /add to add accounts, and /remove to delete them."
     )
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("📚 Set Source", callback_data="set_source")],
         [InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
+        [InlineKeyboardButton("➕ Add Account", callback_data="call_add_command")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
@@ -181,13 +182,20 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(message_text, reply_markup=reply_markup)
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("Paste Single String", callback_data="add_single")],
         [InlineKeyboardButton("Paste Multiple Strings", callback_data="add_multiple")],
-        [InlineKeyboardButton("Via Phone Number (/generate)", callback_data="call_generate")],
+        [InlineKeyboardButton("Via Phone Number", callback_data="call_generate")],
+        [InlineKeyboardButton("« Back to Settings", callback_data="main_settings")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_html("<b>How would you like to add an account?</b>", reply_markup=reply_markup)
+    
+    message_text = "<b>How would you like to add an account?</b>"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    else:
+        await update.message.reply_html(message_text, reply_markup=reply_markup)
 
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -232,65 +240,82 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
     await asyncio.sleep(3)
     await settings_command(update, context)
 
-# --- Conversation Handlers ---
-async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state, prompt: str):
-    """Generic function to start a conversation step."""
+async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['next_step'] = step
+    await query.edit_message_text(text)
+
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get('next_step')
+    if not step: return
+
+    # Session generation logic is now its own ConversationHandler, so this is for other inputs
+    del context.user_data['next_step']
+
+    if step == 'awaiting_source':
+        try:
+            chat_id = int(update.message.text)
+            config_collection.update_one({"_id": "config"}, {"$set": {"source_chat_id": chat_id}}, upsert=True)
+            await update.message.reply_text(f"✅ Source chat updated to: {chat_id}")
+        except ValueError: await update.message.reply_text("❌ Invalid ID.")
+        await settings_command(update, context)
+
+    elif step == 'awaiting_target':
+        username = update.message.text.strip()
+        if username.startswith("@") and len(username) > 4:
+            config_collection.update_one({"_id": "config"}, {"$set": {"target_chat_username": username}}, upsert=True)
+            await update.message.reply_text(f"✅ Target chat updated to: {username}")
+        else: await update.message.reply_text("❌ Invalid username.")
+        await settings_command(update, context)
+
+    elif step == 'awaiting_single_account':
+        session_string = update.message.text
+        msg = await update.message.reply_text("⏳ Processing...")
+        status, user_info = await start_userbot(session_string, context.application, update_info=True)
+        if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
+        elif status == "already_exists": await msg.edit_text("⚠️ Account already exists.")
+        elif status == "account_restricted": await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
+        else: await msg.edit_text("❌ Invalid session string.")
+        await asyncio.sleep(2)
+        await add_command(update, context)
+
+    elif step == 'awaiting_multiple_accounts':
+        text = update.message.text
+        session_strings = [s.strip() for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
+        msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
+        success, fail = 0, 0
+        for session in session_strings:
+            status, _ = await start_userbot(session, context.application, update_info=True)
+            if status == "success": success += 1
+            else: fail += 1
+        await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
+        await asyncio.sleep(2)
+        await add_command(update, context)
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'temp_client' in context.user_data:
+        client = context.user_data.get('temp_client')
+        if client and client.is_connected: await client.disconnect()
+    context.user_data.clear()
+    await update.message.reply_text("Action cancelled.")
+    return ConversationHandler.END
+
+# --- Session Generator ---
+async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts the session generation conversation."""
+    # Check if started from a button press
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(prompt)
+        message = update.callback_query.message
     else:
-        await update.message.reply_text(prompt)
-    return state
+        message = update.message
 
-async def set_source_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat_id = int(update.message.text)
-        config_collection.update_one({"_id": "config"}, {"$set": {"source_chat_id": chat_id}}, upsert=True)
-        await update.message.reply_text(f"✅ Source chat updated to: {chat_id}")
-    except ValueError: await update.message.reply_text("❌ Invalid ID.")
-    await settings_command(update, context)
-    return ConversationHandler.END
-
-async def set_target_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    username = update.message.text.strip()
-    if username.startswith("@") and len(username) > 4:
-        config_collection.update_one({"_id": "config"}, {"$set": {"target_chat_username": username}}, upsert=True)
-        await update.message.reply_text(f"✅ Target chat updated to: {username}")
-    else: await update.message.reply_text("❌ Invalid username.")
-    await settings_command(update, context)
-    return ConversationHandler.END
-    
-async def add_single_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    session_string = update.message.text
-    msg = await update.message.reply_text("⏳ Processing...")
-    status, user_info = await start_userbot(session_string, context.application, update_info=True)
-    if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
-    elif status == "already_exists": await msg.edit_text("⚠️ Account already exists.")
-    elif status == "account_restricted": await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
-    else: await msg.edit_text("❌ Invalid session string.")
-    await asyncio.sleep(2)
-    await add_command(update, context)
-    return ConversationHandler.END
-    
-async def add_multiple_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    session_strings = [s.strip() for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
-    msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
-    success, fail = 0, 0
-    for session in session_strings:
-        status, _ = await start_userbot(session, context.application, update_info=True)
-        if status == "success": success += 1
-        else: fail += 1
-    await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
-    await asyncio.sleep(2)
-    await add_command(update, context)
-    return ConversationHandler.END
-
-async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
+    await message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
     return PHONE
 
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles receiving the phone number."""
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
@@ -379,14 +404,6 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.delete()
     return ConversationHandler.END
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'temp_client' in context.user_data:
-        client = context.user_data.get('temp_client')
-        if client and client.is_connected: await client.disconnect()
-    context.user_data.clear()
-    await update.message.reply_text("Action cancelled.")
-    return ConversationHandler.END
-
 # --- Independent Commands ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = datetime.now()
@@ -416,44 +433,24 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     started, total = await start_all_userbots_from_db(context.application, update_info=True)
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
 
-# --- Health Check Server & Main Runner ---
+# --- Main Application Runner ---
 def main():
     """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Conversation Handlers
+    # Conversation handler for the session generator
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query.message, c), pattern="^call_generate$")
+            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$")
         ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
             PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_2fa_password)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_command)], conversation_timeout=300
-    )
-    
-    source_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, SET_SOURCE, "Please send the source chat ID."), pattern="^set_source$")],
-        states={ SET_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_source_from_input)] },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    target_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, SET_TARGET, "Please send the target bot username."), pattern="^set_target$")],
-        states={ SET_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_target_from_input)] },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    add_single_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_SINGLE, "Please paste the session string."), pattern="^add_single$")],
-        states={ ADD_SINGLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_single_from_input)] },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    add_multiple_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: ask_for_input(u,c, ADD_MULTIPLE, "Please paste all session strings."), pattern="^add_multiple$")],
-        states={ ADD_MULTIPLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_multiple_from_input)] },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+        conversation_timeout=300
     )
     
     # Command Handlers
@@ -464,18 +461,21 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
     application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
-    
-    # Add Conversations to Application
     application.add_handler(gen_conv)
-    application.add_handler(source_conv)
-    application.add_handler(target_conv)
-    application.add_handler(add_single_conv)
-    application.add_handler(add_multiple_conv)
 
-    # Callback Handlers
+    # Callback Handlers for simple state setting
+    application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
+    application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
+    application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please paste the session string."), pattern="^add_single$"))
+    application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please paste all session strings."), pattern="^add_multiple$"))
+
+    # Other Callback Handlers
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
+    
+    # Main text handler for processing state-based inputs
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     logger.info("Bot is starting...")
     application.run_polling()
