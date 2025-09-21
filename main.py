@@ -81,8 +81,10 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-        device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3",
-        app_version="4.8.3", lang_code="en"
+        device_model=generate_device_name(),
+        system_version="Telegram Desktop 4.8.3",
+        app_version="4.8.3",
+        lang_code="en"
     )
     try:
         await client.start()
@@ -151,7 +153,8 @@ async def get_target_chat():
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔️ You are not authorized.")
+        if update.message: await update.message.reply_text("⛔️ You are not authorized.")
+        elif update.callback_query: await update.callback_query.answer("⛔️ You are not authorized.", show_alert=True)
         return
     await command_handler(update, context)
 
@@ -313,6 +316,7 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PHONE
 
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles receiving the phone number."""
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
@@ -430,16 +434,16 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     started, total = await start_all_userbots_from_db(context.application, update_info=True)
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
 
-# --- Main Application Runner ---
-async def main():
-    """Initializes and runs all bot components."""
+# --- Health Check Server & Main Runner ---
+def main():
+    """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Conversation handler for the session generator
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u, c), pattern="^call_generate$")
+            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$")
         ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
@@ -470,12 +474,13 @@ async def main():
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
+    application.add_handler(CallbackQueryHandler(lambda u,c: add_command(u, c), pattern="^call_add_command$"))
     
     # Main text handler for processing state-based inputs
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     logger.info("Bot is starting...")
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
