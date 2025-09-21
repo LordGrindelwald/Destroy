@@ -12,6 +12,7 @@ import os
 import asyncio
 import logging
 import random
+import string
 from datetime import datetime
 from functools import partial
 from pymongo import MongoClient
@@ -20,7 +21,8 @@ from dotenv import load_dotenv
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
-    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
+    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
+    UserBannedInDcError
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -62,6 +64,20 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+# MODIFIED: This function now uses a list of real device/motherboard names.
+def generate_device_name():
+    """Generates a realistic device name from a predefined list."""
+    device_names = [
+        "MSI-B550-GAMING-PLUS", "ASUS-ROG-STRIX-Z690-E", "GIGABYTE-AORUS-MASTER",
+        "DELL-XPS-DESKTOP", "HP-PAVILION-GAMING", "LENOVO-LEGION-TOWER",
+        "ALIENWARE-AURORA-R13", "NZXT-STREAMER-PC", "CYBERPOWER-GAMER-XTREME",
+        "IBUYPOWER-PRO", "ASROCK-STEEL-LEGEND", "RAZER-BLADE-STEALTH",
+        "SURFACE-STUDIO", "MACBOOK-PRO-16", "THINKCENTRE-M90"
+    ]
+    # Optionally add a random suffix to make it more unique
+    suffix = ''.join(random.choices(string.digits, k=4))
+    return f"{random.choice(device_names)}-{suffix}"
+
 # --- Userbot Core Logic ---
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
@@ -95,22 +111,38 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
             await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
+    client = PyrogramClient(
+        name=f"userbot_{len(active_userbots)}",
+        api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
+        device_model=generate_device_name(),
+        system_version="Windows 11 Pro", # A common OS version
+        app_version="4.8.3" # A recent Telegram Desktop version
+    )
     try:
-        userbot = PyrogramClient(name=f"userbot_{len(active_userbots)}", api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True)
-        await userbot.start()
-        if userbot.me.id in active_userbots:
-            await userbot.stop()
+        await client.start()
+        me = await client.get_me()
+        if me.id in active_userbots:
+            await client.stop()
             return "already_exists", None
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        userbot.add_handler(PyrogramMessageHandler(handler_with_context))
-        active_userbots[userbot.me.id] = {"client": userbot, "task": asyncio.current_task()}
+        client.add_handler(PyrogramMessageHandler(handler_with_context))
+        active_userbots[me.id] = {"client": client, "task": asyncio.current_task()}
         if update_info:
-            account_info = {"user_id": userbot.me.id, "first_name": userbot.me.first_name, "username": userbot.me.username, "phone_number": userbot.me.phone_number, "session_string": session_string}
-            accounts_collection.update_one({"user_id": userbot.me.id}, {"$set": account_info}, upsert=True)
-        return "success", userbot.me
-    except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated): return "invalid_session", None
+            account_info = {
+                "user_id": me.id, "first_name": me.first_name, "username": me.username,
+                "phone_number": me.phone_number, "session_string": session_string,
+            }
+            accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
+        return "success", me
+    except UserBannedInDcError:
+        logger.error("Login successful, but account is restricted.")
+        await client.stop()
+        return "account_restricted", None
+    except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
+        return "invalid_session", None
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error in start_userbot: {e}")
+        if client.is_connected: await client.stop()
         return "error", None
 
 async def start_all_userbots_from_db(application: Application, update_info: bool = False):
@@ -140,10 +172,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
-        [InlineKeyboardButton("📚 Set Source", callback_data="set_source"),
-        InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
-        [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts"),
-        InlineKeyboardButton("⚙️ Generate Session", callback_data="generate_session")],
+        [InlineKeyboardButton("📚 Set Source", callback_data="set_source")],
+        [InlineKeyboardButton("🎯 Set Target", callback_data="set_target")],
+        [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
+        [InlineKeyboardButton("⚙️ Generate Session", callback_data="generate_session")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
@@ -248,65 +280,73 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    if step == 'awaiting_phone_number':
-        phone = update.message.text
-        context.user_data['phone'] = phone
-        client = PyrogramClient(name=f"generator_{update.effective_user.id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        context.user_data['temp_client'] = client
-        try:
-            await client.connect()
-            sent_code = await client.send_code(phone)
-            context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-            context.user_data['next_step'] = 'awaiting_login_code'
-            await update.message.reply_text("A login code has been sent. Please send it here.")
-        except PhoneNumberInvalid:
-            await update.message.reply_html("❌ <b>Error:</b> The phone number is invalid. Process cancelled.")
-            context.user_data.clear()
-        except Exception as e:
-            await update.message.reply_html(f"❌ <b>An unexpected error occurred:</b> {e}. Process cancelled.")
-            context.user_data.clear()
-        return
+    if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
+        if step == 'awaiting_phone_number':
+            phone = update.message.text
+            context.user_data['phone'] = phone
+            client = PyrogramClient(
+                name=f"generator_{update.effective_user.id}",
+                api_id=API_ID, api_hash=API_HASH, in_memory=True,
+                device_model=generate_device_name(),
+                system_version="Windows 11 Pro",
+                app_version="4.8.3"
+            )
+            context.user_data['temp_client'] = client
+            try:
+                await client.connect()
+                sent_code = await client.send_code(phone)
+                context.user_data['phone_code_hash'] = sent_code.phone_code_hash
+                context.user_data['next_step'] = 'awaiting_login_code'
+                await update.message.reply_text("A login code has been sent. Please send it here.")
+            except PhoneNumberInvalid:
+                await update.message.reply_html("❌ <b>Error:</b> The phone number is invalid. Cancelled.")
+                context.user_data.clear()
+            except Exception as e:
+                await update.message.reply_html(f"❌ <b>Error:</b> {e}. Cancelled.")
+                context.user_data.clear()
+            return
+        
+        client = context.user_data.get('temp_client')
+        if not client: context.user_data.clear(); return
 
-    if step == 'awaiting_login_code':
-        code = update.message.text
-        client = context.user_data['temp_client']
-        phone = context.user_data['phone']
-        phone_code_hash = context.user_data['phone_code_hash']
-        try:
-            await client.sign_in(phone, phone_code_hash, code)
-            session_string = await client.export_session_string()
-            await client.disconnect()
-            keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
-            await update.message.reply_html(f"✅ <b>Success!</b> Here is your session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
-            context.user_data.clear()
-        except SessionPasswordNeeded:
-            context.user_data['next_step'] = 'awaiting_2fa_password'
-            await update.message.reply_text("Your account has 2FA enabled. Please send your password.")
-        except (PhoneCodeInvalid, PhoneCodeExpired):
-            await update.message.reply_html("❌ <b>Error:</b> The login code is invalid or expired. Cancelled.")
-            if client.is_connected: await client.disconnect()
-            context.user_data.clear()
-        finally:
-             await update.message.delete()
-        return
-
-    if step == 'awaiting_2fa_password':
-        password = update.message.text
-        client = context.user_data['temp_client']
-        try:
-            await client.check_password(password)
-            session_string = await client.export_session_string()
-            await client.disconnect()
-            keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
-            await update.message.reply_html(f"✅ <b>Success!</b> Here is your session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
-        except PasswordHashInvalid:
-            await update.message.reply_html("❌ <b>Error:</b> The password is incorrect. Cancelled.")
-            if client.is_connected: await client.disconnect()
-            context.user_data.clear()
-        finally:
-            await update.message.delete()
-        return
-
+        if step == 'awaiting_login_code':
+            code = update.message.text
+            phone = context.user_data['phone']
+            phone_code_hash = context.user_data['phone_code_hash']
+            try:
+                await client.sign_in(phone, phone_code_hash, code)
+                session_string = await client.export_session_string()
+                await client.disconnect()
+                keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
+                await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
+                context.user_data.clear()
+            except SessionPasswordNeeded:
+                context.user_data['next_step'] = 'awaiting_2fa_password'
+                await update.message.reply_text("2FA is enabled. Please send your password.")
+            except (PhoneCodeInvalid, PhoneCodeExpired):
+                await update.message.reply_html("❌ <b>Error:</b> Invalid/expired code. Cancelled.")
+                if client.is_connected: await client.disconnect()
+                context.user_data.clear()
+            finally:
+                 await update.message.delete()
+            return
+            
+        elif step == 'awaiting_2fa_password':
+            password = update.message.text
+            try:
+                await client.check_password(password)
+                session_string = await client.export_session_string()
+                await client.disconnect()
+                keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
+                await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
+            except PasswordHashInvalid:
+                await update.message.reply_html("❌ <b>Error:</b> Incorrect password. Cancelled.")
+                if client.is_connected: await client.disconnect()
+                context.user_data.clear()
+            finally:
+                await update.message.delete()
+            return
+    
     del context.user_data['next_step']
     if step == 'awaiting_source':
         try:
@@ -330,6 +370,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
         if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
         elif status == "already_exists": await msg.edit_text("⚠️ Account already exists.")
+        elif status == "account_restricted": await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
         else: await msg.edit_text("❌ Invalid session string.")
         await asyncio.sleep(2)
         await add_command(update, context)
@@ -362,6 +403,7 @@ async def add_generated_session_callback(update: Update, context: ContextTypes.D
     status, user_info = await start_userbot(session_string, context.application, update_info=True)
     if status == "success": await query.edit_message_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
     elif status == "already_exists": await query.edit_message_text("⚠️ This account already exists.")
+    elif status == "account_restricted": await query.edit_message_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
     else: await query.edit_message_text("❌ An error occurred.")
     await asyncio.sleep(3)
     await settings_command(update, context)
@@ -434,28 +476,17 @@ async def temp_fwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /temp_fwd &lt;userbot_user_id&gt;")
 
-# THIS IS THE CORRECTED FUNCTION
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = int(query.data.split("_")[2])
-    
-    # Give immediate pop-up feedback
     await query.answer(text="Notifications will be paused.")
-    
     if uid not in active_userbots:
         await query.edit_message_text("This userbot is no longer active.", reply_markup=None)
         return
-        
     paused_notifications.add(uid)
     context.job_queue.run_once(unpause_notifications_job, 300, data={"user_id": uid}, name=f"unpause_notify_{uid}")
-    
-    # Update the original message to reflect the new state
-    updated_text = (
-        f"⏸️ Forwarding is paused for <code>{uid}</code> for 5 minutes.\n\n"
-        f"<b>✅ Update:</b> Notifications are now also paused."
-    )
+    updated_text = (f"⏸️ Forwarding is paused for <code>{uid}</code> for 5 minutes.\n\n<b>✅ Update:</b> Notifications are now also paused.")
     await query.edit_message_html(updated_text, reply_markup=None)
-
 
 # --- Health Check Server for Koyeb ---
 async def health_check_server():
@@ -481,7 +512,6 @@ async def main():
         server = await asyncio.start_server(lambda r, w: w.close(), host, port)
         application = Application.builder().token(BOT_TOKEN).build()
 
-        # Command handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
         application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
@@ -494,7 +524,6 @@ async def main():
         application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
         application.add_handler(CommandHandler("generate", lambda u, c: owner_only(u, c, ask_to_generate_session)))
 
-        # Callback handlers for buttons
         application.add_handler(CallbackQueryHandler(ask_for_source_chat, pattern="^set_source$"))
         application.add_handler(CallbackQueryHandler(ask_for_target_chat, pattern="^set_target$"))
         application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
@@ -507,7 +536,6 @@ async def main():
         application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session:"))
         application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
 
-        # The text handler that processes replies based on the state
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
         await run_bot_as_leader(application)
