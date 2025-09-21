@@ -21,8 +21,7 @@ from dotenv import load_dotenv
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
-    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
-    UserBannedInDcError
+    SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -90,6 +89,7 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
     source_chat_id = await get_source_chat()
     if message.chat.id == source_chat_id:
         try:
+            # Removed the "mark as read" feature as it can cause issues with new accounts
             target_chat = await get_target_chat()
             is_forwarding_paused = client.me.id in paused_forwarding
             if not is_forwarding_paused:
@@ -108,50 +108,37 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
             await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
-    """Initializes, starts, and stores a single Pyrogram userbot client."""
     client = PyrogramClient(
         name=f"userbot_{len(active_userbots)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
         device_model=generate_device_name(),
         system_version="Telegram Desktop 5.8.2 x64",
         app_version="5.8.2",
-        lang_code="en",
-        system_lang_code="en"
+        lang_code="en"
     )
     try:
         await client.start()
-
-        # After connecting, try to get user info. This is where the restriction error can happen.
         me = await client.get_me()
-
         if me.id in active_userbots:
             await client.stop()
             return "already_exists", None
-
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         client.add_handler(PyrogramMessageHandler(handler_with_context))
-        
         active_userbots[me.id] = {"client": client, "task": asyncio.current_task()}
-        
         if update_info:
             account_info = {
                 "user_id": me.id, "first_name": me.first_name, "username": me.username,
                 "phone_number": me.phone_number, "session_string": session_string,
             }
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
-        
         return "success", me
-
-    except UserBannedInDcError:
-        logger.error("Login successful, but account is restricted and cannot fetch its own details.")
-        await client.stop()
-        return "account_restricted", None
     except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
         return "invalid_session", None
     except Exception as e:
-        logger.error(f"An unexpected error occurred in start_userbot: {e}")
-        if client.is_connected:
-            await client.stop()
+        logger.error(f"An unexpected error in start_userbot: {e}")
+        if "AUTH_KEY_PERM_EMPTY" in str(e):
+             return "account_restricted", None
+        if client.is_connected: await client.stop()
         return "error", None
 
 async def start_all_userbots_from_db(application: Application, update_info: bool = False):
@@ -189,7 +176,11 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     source_chat_id = await get_source_chat()
     target_chat = await get_target_chat() or "Not Set"
-    message_text = (f"⚙️ <b>Settings Dashboard</b>\n\n▶️ <b>Source:</b> <code>{source_chat_id}</code>\n🎯 <b>Target:</b> <code>{escape_html(target_chat)}</code>")
+    message_text = (
+        f"⚙️ <b>Settings Dashboard</b>\n\n"
+        f"▶️ <b>Source:</b> <code>{source_chat_id}</code>\n"
+        f"🎯 <b>Target:</b> <code>{escape_html(target_chat)}</code>"
+    )
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     else:
@@ -285,78 +276,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # Session generation logic
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
-        if step == 'awaiting_phone_number':
-            phone = update.message.text
-            context.user_data['phone'] = phone
-            client = PyrogramClient(
-                name=f"generator_{update.effective_user.id}",
-                api_id=API_ID, api_hash=API_HASH, in_memory=True,
-                device_model=generate_device_name(),
-                system_version="Telegram Desktop 5.8.2 x64",
-                app_version="5.8.2",
-                lang_code="en",
-                system_lang_code="en"
-            )
-            context.user_data['temp_client'] = client
-            try:
-                await client.connect()
-                sent_code = await client.send_code(phone)
-                context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-                context.user_data['next_step'] = 'awaiting_login_code'
-                await update.message.reply_text("A login code has been sent. Please send it here.")
-            except PhoneNumberInvalid:
-                await update.message.reply_html("❌ <b>Error:</b> The phone number is invalid. Cancelled.")
-                context.user_data.clear()
-            except Exception as e:
-                await update.message.reply_html(f"❌ <b>Error:</b> {e}. Cancelled.")
-                context.user_data.clear()
-            return
-        
-        client = context.user_data.get('temp_client')
-        if not client:
-            context.user_data.clear()
-            return
+        await handle_session_generation(step, update, context)
+        return
 
-        if step == 'awaiting_login_code':
-            code = update.message.text
-            phone = context.user_data['phone']
-            phone_code_hash = context.user_data['phone_code_hash']
-            try:
-                await client.sign_in(phone, phone_code_hash, code)
-                session_string = await client.export_session_string()
-                await client.disconnect()
-                keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
-                await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
-                context.user_data.clear()
-            except SessionPasswordNeeded:
-                context.user_data['next_step'] = 'awaiting_2fa_password'
-                await update.message.reply_text("2FA is enabled. Please send your password.")
-            except (PhoneCodeInvalid, PhoneCodeExpired):
-                await update.message.reply_html("❌ <b>Error:</b> Invalid/expired code. Cancelled.")
-                if client.is_connected: await client.disconnect()
-                context.user_data.clear()
-            finally:
-                 await update.message.delete()
-            return
-            
-        elif step == 'awaiting_2fa_password':
-            password = update.message.text
-            try:
-                await client.check_password(password)
-                session_string = await client.export_session_string()
-                await client.disconnect()
-                keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
-                await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
-            except PasswordHashInvalid:
-                await update.message.reply_html("❌ <b>Error:</b> Incorrect password. Cancelled.")
-                if client.is_connected: await client.disconnect()
-                context.user_data.clear()
-            finally:
-                await update.message.delete()
-            return
-    
     del context.user_data['next_step']
     if step == 'awaiting_source':
         try:
@@ -398,10 +321,75 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(2)
         await add_command(update, context)
 
+async def handle_session_generation(step, update, context):
+    """Refactored session generation logic."""
+    if step == 'awaiting_phone_number':
+        phone = update.message.text
+        context.user_data['phone'] = phone
+        await update.message.reply_text("⏳ Connecting to Telegram...")
+        client = PyrogramClient(
+            name=f"generator_{update.effective_user.id}",
+            api_id=API_ID, api_hash=API_HASH, in_memory=True,
+            device_model=generate_device_name(), system_version="Telegram Desktop 5.8.2 x64",
+            app_version="5.8.2", lang_code="en"
+        )
+        context.user_data['temp_client'] = client
+        try:
+            await client.connect()
+            sent_code = await client.send_code(phone)
+            context.user_data['phone_code_hash'] = sent_code.phone_code_hash
+            context.user_data['next_step'] = 'awaiting_login_code'
+            await update.message.reply_text("A login code has been sent. Please send it here.")
+        except PhoneNumberInvalid:
+            await update.message.reply_html("❌ <b>Error:</b> The phone number is invalid. Cancelled.")
+            context.user_data.clear()
+        except Exception as e:
+            await update.message.reply_html(f"❌ <b>Error connecting or sending code:</b>\n<code>{escape_html(str(e))}</code>\n\nPlease double-check your API_ID and API_HASH. Process cancelled.")
+            context.user_data.clear()
+
+    elif step == 'awaiting_login_code':
+        code = update.message.text
+        client = context.user_data.get('temp_client')
+        phone = context.user_data.get('phone')
+        phone_code_hash = context.user_data.get('phone_code_hash')
+        try:
+            await client.sign_in(phone, phone_code_hash, code)
+            session_string = await client.export_session_string()
+            await client.disconnect()
+            keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
+            await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data.clear()
+        except SessionPasswordNeeded:
+            context.user_data['next_step'] = 'awaiting_2fa_password'
+            await update.message.reply_text("2FA is enabled. Please send your password.")
+        except (PhoneCodeInvalid, PhoneCodeExpired):
+            await update.message.reply_html("❌ <b>Error:</b> Invalid/expired code. Cancelled.")
+            if client and client.is_connected: await client.disconnect()
+            context.user_data.clear()
+        finally:
+             await update.message.delete()
+
+    elif step == 'awaiting_2fa_password':
+        password = update.message.text
+        client = context.user_data.get('temp_client')
+        try:
+            await client.check_password(password)
+            session_string = await client.export_session_string()
+            await client.disconnect()
+            keyboard = [[InlineKeyboardButton("➕ Add this account now", callback_data=f"add_generated_session:{session_string}")]]
+            await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>", reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data.clear()
+        except PasswordHashInvalid:
+            await update.message.reply_html("❌ <b>Error:</b> Incorrect password. Cancelled.")
+            if client and client.is_connected: await client.disconnect()
+            context.user_data.clear()
+        finally:
+            await update.message.delete()
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'temp_client' in context.user_data:
-        client = context.user_data['temp_client']
-        if client.is_connected: await client.disconnect()
+        client = context.user_data.get('temp_client')
+        if client and client.is_connected: await client.disconnect()
     context.user_data.clear()
     await update.message.reply_text("Action cancelled.")
 
