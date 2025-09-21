@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version with Full Fingerprint)
+#          (Definitive Version with All Fixes)
 
 import os
 import asyncio
@@ -65,11 +65,16 @@ def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def generate_device_name():
-    """Generates a realistic, random computer name."""
-    prefixes = ["DESKTOP", "LAPTOP", "WORKSTATION", "PC", "COMPUTER", "SYSTEM"]
-    prefix = random.choice(prefixes)
-    suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
-    return f"{prefix}-{suffix}"
+    """Generates a realistic device name from a predefined list."""
+    device_names = [
+        "MSI-B550-GAMING-PLUS", "ASUS-ROG-STRIX-Z690-E", "GIGABYTE-AORUS-MASTER",
+        "DELL-XPS-DESKTOP", "HP-PAVILION-GAMING", "LENOVO-LEGION-TOWER",
+        "ALIENWARE-AURORA-R13", "NZXT-STREAMER-PC", "CYBERPOWER-GAMER-XTREME",
+        "IBUYPOWER-PRO", "ASROCK-STEEL-LEGEND", "RAZER-BLADE-STEALTH",
+        "SURFACE-STUDIO", "MACBOOK-PRO-16", "THINKCENTRE-M90"
+    ]
+    suffix = ''.join(random.choices(string.digits, k=4))
+    return f"{random.choice(device_names)}-{suffix}"
 
 # --- Userbot Core Logic ---
 async def get_source_chat():
@@ -130,7 +135,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
         return "success", me
     except UserBannedInDcError:
-        logger.error("Login successful, but account is restricted.")
+        logger.error("Login successful, but account is restricted and cannot fetch its own details.")
         await client.stop()
         return "account_restricted", None
     except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
@@ -509,6 +514,7 @@ async def main():
         server = await asyncio.start_server(lambda r, w: w.close(), host, port)
         application = Application.builder().token(BOT_TOKEN).build()
 
+        # Command handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
         application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
@@ -521,6 +527,7 @@ async def main():
         application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_fwd_command)))
         application.add_handler(CommandHandler("generate", lambda u, c: owner_only(u, c, ask_to_generate_session)))
 
+        # Callback handlers for buttons
         application.add_handler(CallbackQueryHandler(ask_for_source_chat, pattern="^set_source$"))
         application.add_handler(CallbackQueryHandler(ask_for_target_chat, pattern="^set_target$"))
         application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
@@ -533,6 +540,7 @@ async def main():
         application.add_handler(CallbackQueryHandler(add_generated_session_callback, pattern="^add_generated_session:"))
         application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
 
+        # The text handler that processes replies based on the state
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
         await run_bot_as_leader(application)
