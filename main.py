@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Final Version - No ConversationHandler)
+#          (Final Version with Database Fix)
 
 import os
 import asyncio
@@ -55,13 +55,14 @@ paused_forwarding = set()
 paused_notifications = set()
 
 # --- Userbot Core Logic ---
+# MODIFIED: These functions now safely handle a non-existent config document
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
-    return config.get("source_chat_id", 777000)
+    return config.get("source_chat_id", 777000) if config else 777000
 
 async def get_target_chat():
     config = config_collection.find_one({"_id": "config"})
-    return config.get("target_chat_username")
+    return config.get("target_chat_username") if config else None
 
 async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: Application):
     if client.me.id in paused_notifications: return
@@ -116,6 +117,7 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
     logger.info(f"Started {count}/{len(all_accounts)} userbots.")
     return count, len(all_accounts)
 
+
 # --- Management Bot Handlers ---
 async def owner_only(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     if update.effective_user.id != OWNER_ID:
@@ -138,7 +140,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"▶️ **Source:** `{source_chat_id}`\n"
         f"🎯 **Target:** `{target_chat}`"
     )
-    # Edit the message if it's a callback, otherwise send a new one
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
     else:
@@ -150,7 +151,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accounts = list(accounts_collection.find())
     text = "👤 **Your Managed Accounts:**\n\n" if accounts else "No accounts have been added yet."
     for acc in accounts:
-        # Escape characters for MarkdownV2
         first_name = acc.get('first_name', 'N/A').replace('-', '\\-').replace('.', '\\.')
         text += (f"**Name:** {first_name}\n**ID:** `{acc.get('user_id', 'N/A')}`\n{'-'*20}\n".replace('-', '\\-'))
     keyboard = [
@@ -337,7 +337,7 @@ async def main():
         application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
         application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please send the session string."), pattern="^add_single$"))
         application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please send all session strings."), pattern="^add_multiple$"))
-        application.add_handler(CallbackQueryHandler(lambda u,c: start_command(u.callback_query, c), pattern="^main_menu$"))
+        application.add_handler(CallbackQueryHandler(lambda u,c: start_command(u,c), pattern="^main_menu$"))
         application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify_"))
 
         # The text handler that processes replies based on the state
