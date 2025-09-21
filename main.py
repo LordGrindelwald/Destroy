@@ -21,6 +21,8 @@ from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
     SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
 )
+# BUG FIX 1: Import the correct handler and give it an alias
+from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -101,7 +103,8 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             await userbot.stop()
             return "already_exists", None
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        userbot.add_handler(MessageHandler(handler_with_context))
+        # BUG FIX 1: Use the aliased PyrogramMessageHandler
+        userbot.add_handler(PyrogramMessageHandler(handler_with_context))
         active_userbots[userbot.me.id] = {"client": userbot, "task": asyncio.current_task()}
         if update_info:
             account_info = {"user_id": userbot.me.id, "first_name": userbot.me.first_name, "username": userbot.me.username, "phone_number": userbot.me.phone_number, "session_string": session_string}
@@ -232,9 +235,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         return
 
-    # Once a state is handled, clear it.
     del context.user_data['next_step']
-
     if step == 'awaiting_source':
         try:
             chat_id = int(update.message.text)
@@ -291,28 +292,22 @@ async def add_generated_session_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
     session_string = context.user_data.get('last_generated_session')
-    
     if not session_string:
-        await query.edit_message_text("Could not find a recently generated session string to add. Please try generating a new one.", reply_markup=None)
+        await query.edit_message_text("Could not find a recently generated session string.", reply_markup=None)
         await asyncio.sleep(3)
-        await start_command(query, context)
+        # BUG FIX 2: Pass the full update object, not the query object
+        await start_command(update, context)
         return
-
     await query.edit_message_text("⏳ Adding the new account...", reply_markup=None)
     status, user_info = await start_userbot(session_string, context.application, update_info=True)
-    
-    if status == "success":
-        await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
-    elif status == "already_exists":
-        await query.edit_message_text("⚠️ This account already exists.")
-    elif status == "invalid_session":
-        await query.edit_message_text("❌ Error: The new session string was rejected as invalid. This can happen if the session was terminated. Please try generating a new one.")
-    else: # status == "error"
-        await query.edit_message_text("❌ An unexpected internal error occurred. Please check the logs for more details.")
-
+    if status == "success": await query.edit_message_text(f"✅ Account added: {escape_markdown_v2(user_info.first_name)}", parse_mode=ParseMode.MARKDOWN_V2)
+    elif status == "already_exists": await query.edit_message_text("⚠️ This account already exists.")
+    elif status == "invalid_session": await query.edit_message_text("❌ Error: The new session string was rejected as invalid.")
+    else: await query.edit_message_text("❌ An unexpected internal error occurred.")
     if 'last_generated_session' in context.user_data: del context.user_data['last_generated_session']
     await asyncio.sleep(4)
-    await start_command(query, context)
+    # BUG FIX 2: Pass the full update object, not the query object
+    await start_command(update, context)
 
 # --- Independent Commands ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
