@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v2.4 - All Fixes)
+#          (Definitive Version v2.5 - Final Fix)
 
 import os
 import asyncio
@@ -69,10 +69,18 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+def clean_session_string(session_string: str) -> str:
+    """Thoroughly cleans the session string."""
+    # Remove all whitespace and control characters
+    cleaned_string = re.sub(r'[\s\x00-\x1f\x7f-\x9f]', '', session_string)
+    # Ensure correct base64 padding
+    padding = len(cleaned_string) % 4
+    if padding != 0:
+        cleaned_string += "=" * (4 - padding)
+    return cleaned_string
+
 # --- Userbot Core Logic ---
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
-    logger.info(f"Attempting to start userbot with session string of length {len(session_string)}.")
-    logger.info(f"Session string start: {session_string[:10]}... end: {session_string[-10:]}")
     try:
         client = PyrogramClient(
             name=f"userbot_{random.randint(1000, 9999)}",
@@ -83,7 +91,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             lang_code="en"
         )
     except Exception as e:
-        logger.error(f"Error initializing PyrogramClient: {e}")
+        logger.error(f"Error initializing PyrogramClient, likely a malformed session string: {e}")
         return "invalid_string", None
 
     try:
@@ -108,6 +116,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
     except Exception as e:
         logger.error(f"An unexpected error in start_userbot: {e}")
         if "AUTH_KEY_PERM_EMPTY" in str(e): return "account_restricted", None
+        if "SESSION_STRING_INVALID" in str(e).upper(): return "invalid_string", None
         if client.is_connected: await client.stop()
         return "error", None
 
@@ -276,9 +285,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_command(update, context)
 
     elif step == 'awaiting_single_account':
-        session_string = re.sub(r'\s+', '', update.message.text)
+        session_string = clean_session_string(update.message.text)
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
+        
         if status == "success":
             await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
         elif status == "already_exists":
@@ -286,15 +296,16 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif status == "account_restricted":
             await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
         elif status == "invalid_string":
-            await msg.edit_text("❌ <b>Error:</b> The session string is structurally invalid. Please re-generate and copy it carefully.", parse_mode=ParseMode.HTML)
+            await msg.edit_text("❌ <b>Error:</b> The session string is invalid or corrupted. Please generate a new one.", parse_mode=ParseMode.HTML)
         else:
-            await msg.edit_text("❌ Invalid session string.")
-        await asyncio.sleep(2)
+            await msg.edit_text("❌ An unknown error occurred.")
+        
+        await asyncio.sleep(3)
         await add_command(update, context)
 
     elif step == 'awaiting_multiple_accounts':
         text = update.message.text
-        session_strings = [s.strip() for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
+        session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
         msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
         success, fail = 0, 0
         for session in session_strings:
@@ -322,8 +333,9 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
+    # FIX: Use a consistent client name for generation
     client = PyrogramClient(
-        name=f"generator_{update.effective_user.id}",
+        name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, in_memory=True,
         device_model="Hexagram",
         system_version="1.7.3",
@@ -371,15 +383,19 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.sign_in(phone, phone_code_hash, code)
         session_string = await client.export_session_string()
-        await client.disconnect()
-
-        await msg.edit_text("✅ **Success!** Session string generated. Now trying to log in...")
-        status, user_info = await start_userbot(session_string, context.application, update_info=True)
-
-        if status == "success":
-            await msg.reply_html(f"✅ Account added automatically: {escape_html(user_info.first_name)}\n\nYour session string:\n<code>{session_string}</code>")
-        else:
-            await msg.reply_html(f"⚠️ An error occurred while adding the account automatically: {status}. Please add it manually using the session string below:\n\n<code>{session_string}</code>")
+        
+        await msg.edit_text("✅ **Success!** Session string generated. Now adding account...")
+        # Since we are using the same client, we can get user info directly
+        me = await client.get_me()
+        
+        account_info = {
+            "user_id": me.id, "first_name": me.first_name, "username": me.username,
+            "phone_number": me.phone_number, "session_string": session_string,
+        }
+        accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
+        active_userbots[me.id] = client # The client is already started and logged in
+        
+        await msg.reply_html(f"✅ Account added automatically: {escape_html(me.first_name)}\n\nYour session string (for backup):\n<code>{session_string}</code>")
         
         return ConversationHandler.END
     except SessionPasswordNeeded:
@@ -404,23 +420,27 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.check_password(password)
         session_string = await client.export_session_string()
-        await client.disconnect()
         
-        await msg.edit_text("✅ **Success!** Session string generated. Now trying to log in...")
-        status, user_info = await start_userbot(session_string, context.application, update_info=True)
+        await msg.edit_text("✅ **Success!** Session string generated. Now adding account...")
+        me = await client.get_me()
+        
+        account_info = {
+            "user_id": me.id, "first_name": me.first_name, "username": me.username,
+            "phone_number": me.phone_number, "session_string": session_string,
+        }
+        accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
+        active_userbots[me.id] = client
 
-        if status == "success":
-            await msg.reply_html(f"✅ Account added automatically: {escape_html(user_info.first_name)}\n\nYour session string:\n<code>{session_string}</code>")
-        else:
-            await msg.reply_html(f"⚠️ An error occurred while adding the account automatically: {status}. Please add it manually using the session string below:\n\n<code>{session_string}</code>")
+        await msg.reply_html(f"✅ Account added automatically: {escape_html(me.first_name)}\n\nYour session string (for backup):\n<code>{session_string}</code>")
 
     except PasswordHashInvalid:
         await msg.edit_text("❌ <b>Error:</b> Incorrect password. Cancelled.")
+        if client.is_connected: await client.disconnect()
     except Exception as e:
         logger.error(f"Error during 2FA stage: {e}")
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
-    finally:
         if client.is_connected: await client.disconnect()
+    finally:
         await update.message.delete()
     return ConversationHandler.END
 
