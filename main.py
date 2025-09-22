@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.5 - Final)
+#          (Definitive Version v3.6 - Final)
 
 import os
 import asyncio
@@ -462,9 +462,14 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
+    
     paused_notifications.add(OWNER_ID)
-    await query.answer("✅ Notifications paused for 5 minutes.", show_alert=True)
-    await query.edit_message_reply_markup(reply_markup=None)
+    original_text = query.message.text
+    await query.edit_message_text(
+        f"{original_text}\n\n<i>✅ Notifications have been paused for 5 minutes.</i>",
+        parse_mode=ParseMode.HTML
+    )
     
     await asyncio.sleep(300)
     if OWNER_ID in paused_notifications:
@@ -508,16 +513,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- Main Runner ---
-async def post_init(application: Application):
-    """Runs after the bot has initialized."""
-    await start_all_userbots_from_db(application)
-
-def main() -> None:
-    """Start the bot."""
+async def main() -> None:
+    """Configures and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # It's better to add the post_init task to the application's startup routines
-    application.post_init = post_init
 
     gen_conv = ConversationHandler(
         entry_points=[CommandHandler("generate", generate_command)],
@@ -528,7 +526,7 @@ def main() -> None:
             ADD_ACCOUNT: [CallbackQueryHandler(add_account_callback, pattern="^add_account$")]
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
-        conversation_timeout=300
+        conversation_timeout=300,
     )
 
     # Command Handlers
@@ -559,8 +557,14 @@ def main() -> None:
     # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
-    logger.info("Bot is starting...")
-    application.run_polling()
+    # Run application
+    try:
+        await application.initialize()
+        await start_all_userbots_from_db(application)
+        logger.info("Bot is starting...")
+        await application.run_polling()
+    finally:
+        await application.shutdown()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
