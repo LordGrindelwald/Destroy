@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.4 - Final)
+#          (Definitive Version v3.5 - Final)
 
 import os
 import asyncio
@@ -100,7 +100,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
         client = PyrogramClient(
             name=f"userbot_{random.randint(1000, 9999)}",
             api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-            device_model=generate_device_name(), system_version="1.7.3", app_version="1.7.3", lang_code="en"
+            device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3", app_version="4.8.3", lang_code="en"
         )
     except Exception as e:
         logger.error(f"Error initializing PyrogramClient: {e}")
@@ -352,7 +352,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}", api_id=API_ID, api_hash=API_HASH, in_memory=True,
-        device_model=generate_device_name(), system_version="1.7.3", app_version="1.7.3", lang_code="en"
+        device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3", app_version="4.8.3", lang_code="en"
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
@@ -508,10 +508,17 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- Main Runner ---
-async def main():
-    """Initializes and runs the bot."""
+async def post_init(application: Application):
+    """Runs after the bot has initialized."""
+    await start_all_userbots_from_db(application)
+
+def main() -> None:
+    """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
-    
+
+    # It's better to add the post_init task to the application's startup routines
+    application.post_init = post_init
+
     gen_conv = ConversationHandler(
         entry_points=[CommandHandler("generate", generate_command)],
         states={
@@ -552,11 +559,8 @@ async def main():
     # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
-    # Initialize userbots before polling
-    await start_all_userbots_from_db(application)
-
     logger.info("Bot is starting...")
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
