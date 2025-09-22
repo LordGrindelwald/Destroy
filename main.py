@@ -68,22 +68,14 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def generate_device_name():
-    """Generates a realistic device name from a predefined list."""
-    device_names = [
-        "MSI B550", "Asus ROG Strix Z690E", "Gigabyte Aorus Master",
-        "XPS Desktop", "Hp Pavilion Plus", "Lenovo Legion Tower", "Aurora R13"
-    ]
-    return random.choice(device_names)
-
 # --- Userbot Core Logic ---
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-        device_model=generate_device_name(),
-        system_version="Telegram Desktop 4.8.3",
-        app_version="4.8.3",
+        device_model="Hexagram",
+        system_version="1.7.3",
+        app_version="1.7.3",
         lang_code="en"
     )
     try:
@@ -277,7 +269,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_command(update, context)
 
     elif step == 'awaiting_single_account':
-        session_string = update.message.text
+        session_string = update.message.text.strip()
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
         if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
@@ -322,9 +314,9 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = PyrogramClient(
         name=f"generator_{update.effective_user.id}",
         api_id=API_ID, api_hash=API_HASH, in_memory=True,
-        device_model=generate_device_name(),
-        system_version="Telegram Desktop 4.8.3",
-        app_version="4.8.3",
+        device_model="Hexagram",
+        system_version="1.7.3",
+        app_version="1.7.3",
         lang_code="en"
     )
     try:
@@ -364,23 +356,31 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = context.user_data['temp_client']
     phone = context.user_data['phone']
     phone_code_hash = context.user_data['phone_code_hash']
-    await update.message.reply_text("⏳ Signing in...")
+    msg = await update.message.reply_text("⏳ Signing in...")
     try:
         await client.sign_in(phone, phone_code_hash, code)
         session_string = await client.export_session_string()
         await client.disconnect()
-        await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>")
+
+        await msg.edit_text("✅ **Success!** Session string generated. Now trying to log in...")
+        status, user_info = await start_userbot(session_string, context.application, update_info=True)
+
+        if status == "success":
+            await msg.reply_html(f"✅ Account added automatically: {escape_html(user_info.first_name)}\n\nYour session string:\n<code>{session_string}</code>")
+        else:
+            await msg.reply_html(f"⚠️ An error occurred while adding the account automatically: {status}. Please add it manually using the session string below:\n\n<code>{session_string}</code>")
+        
         return ConversationHandler.END
     except SessionPasswordNeeded:
-        await update.message.reply_text("2FA is enabled. Please send your password.")
+        await msg.edit_text("2FA is enabled. Please send your password.")
         return PASSWORD
     except (PhoneCodeInvalid, PhoneCodeExpired):
-        await update.message.reply_html("❌ <b>Error:</b> Invalid or expired code. Cancelled.")
+        await msg.edit_text("❌ <b>Error:</b> Invalid or expired code. Cancelled.")
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error during login code stage: {e}")
-        await update.message.reply_html(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
     finally:
@@ -389,17 +389,25 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
     client = context.user_data['temp_client']
-    await update.message.reply_text("⏳ Checking password...")
+    msg = await update.message.reply_text("⏳ Checking password...")
     try:
         await client.check_password(password)
         session_string = await client.export_session_string()
         await client.disconnect()
-        await update.message.reply_html(f"✅ <b>Success!</b> Session string:\n\n<code>{session_string}</code>")
+        
+        await msg.edit_text("✅ **Success!** Session string generated. Now trying to log in...")
+        status, user_info = await start_userbot(session_string, context.application, update_info=True)
+
+        if status == "success":
+            await msg.reply_html(f"✅ Account added automatically: {escape_html(user_info.first_name)}\n\nYour session string:\n<code>{session_string}</code>")
+        else:
+            await msg.reply_html(f"⚠️ An error occurred while adding the account automatically: {status}. Please add it manually using the session string below:\n\n<code>{session_string}</code>")
+
     except PasswordHashInvalid:
-        await update.message.reply_html("❌ <b>Error:</b> Incorrect password. Cancelled.")
+        await msg.edit_text("❌ <b>Error:</b> Incorrect password. Cancelled.")
     except Exception as e:
         logger.error(f"Error during 2FA stage: {e}")
-        await update.message.reply_html(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
     finally:
         if client.is_connected: await client.disconnect()
         await update.message.delete()
