@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v4.2 - Final)
+#          (Definitive Version v4.3 - Final)
 
 import os
 import asyncio
@@ -208,6 +208,7 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
             acc_id = account.get('first_name') or account.get('user_id') or f"...{session_str[-4:]}"
             error_details.append(f"• <b>{escape_html(acc_id)}:</b> {escape_html(detail)}")
 
+    logger.info(f"Started {success_count}/{len(all_accounts)} userbots from DB.")
     return success_count, len(all_accounts), error_details
 
 async def get_source_chat():
@@ -491,40 +492,64 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         message = await update.message.reply_text(f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
                                                   reply_markup=InlineKeyboardMarkup(keyboard))
         
-        await asyncio.sleep(300)
-
-        if user_id_to_pause in paused_forwarding:
-            paused_forwarding.discard(user_id_to_pause)
-            resumed_text = f"Resumed forwarding for user ID {user_id_to_pause}."
-            if context.bot_data.get(pause_id):
-                paused_notifications.discard(OWNER_ID)
-                resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_pause}."
-            
-            logger.info(resumed_text)
-            await context.bot.send_message(OWNER_ID, resumed_text)
-            await message.edit_text(f"<i>Pause ended for user ID {user_id_to_pause}.</i>", parse_mode=ParseMode.HTML)
-            del context.bot_data[pause_id]
+        context.application.job_queue.run_once(
+            callback=resume_forwarding_job,
+            when=300,
+            data={'user_id': user_id_to_pause, 'pause_id': pause_id, 'message_id': message.message_id},
+            name=f"resume_{pause_id}"
+        )
 
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /temp <user_id>")
 
+async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    user_id_to_resume = job_data['user_id']
+    pause_id = job_data['pause_id']
+    message_id = job_data['message_id']
+    
+    if user_id_to_resume in paused_forwarding:
+        paused_forwarding.discard(user_id_to_resume)
+        resumed_text = f"Resumed forwarding for user ID {user_id_to_resume}."
+        
+        if context.bot_data.get(pause_id): # Check if notifications were also paused
+            paused_notifications.discard(OWNER_ID)
+            resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_resume}."
+        
+        logger.info(resumed_text)
+        await context.bot.send_message(OWNER_ID, resumed_text)
+        await context.bot.edit_message_text(chat_id=OWNER_ID, message_id=message_id, 
+                                            text=f"<i>Pause ended for user ID {user_id_to_resume}.</i>", 
+                                            parse_mode=ParseMode.HTML)
+        if pause_id in context.bot_data:
+            del context.bot_data[pause_id]
+
+# THIS IS THE FIXED FUNCTION
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    pause_id = query.data.split("_")[2]
+    await query.answer()
+    
+    # Correctly parse the pause_id from the callback data
+    try:
+        parts = query.data.split("_")
+        pause_id = "_".join(parts[2:])
+    except IndexError:
+        await query.edit_message_text(f"{query.message.text}\n\n<i>Error: Invalid pause data.</i>", parse_mode=ParseMode.HTML)
+        return
 
     if pause_id not in context.bot_data:
-        await query.answer("This pause has expired.", show_alert=True)
+        await query.answer("This pause has expired or is invalid.", show_alert=True)
         await query.edit_message_text(f"{query.message.text}\n\n<i>This pause has expired.</i>", parse_mode=ParseMode.HTML)
         return
 
-    await query.answer()
     paused_notifications.add(OWNER_ID)
-    context.bot_data[pause_id] = True
+    context.bot_data[pause_id] = True # Mark that notifications were paused
     
     await query.edit_message_text(
         f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        reply_markup=None # Remove the button after it's clicked
     )
 
 @owner_only
@@ -532,9 +557,14 @@ async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for user_id in active_userbots.keys(): paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
     await update.message.reply_text("✅ Paused all forwarding and notifications for 5 minutes.")
-    await asyncio.sleep(300)
-    paused_forwarding.clear(); paused_notifications.discard(OWNER_ID)
-    logger.info("Resumed all forwarding and notifications."); await context.bot.send_message(OWNER_ID, "Resumed all.")
+    
+    context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
+
+async def resume_all_job(context: ContextTypes.DEFAULT_TYPE):
+    paused_forwarding.clear()
+    paused_notifications.discard(OWNER_ID)
+    logger.info("Resumed all forwarding and notifications.")
+    await context.bot.send_message(OWNER_ID, "Resumed all forwarding and notifications.")
 
 
 @owner_only
@@ -599,10 +629,8 @@ def main() -> None:
         conversation_timeout=300,
     )
 
-    # Add conversation handler with priority
     application.add_handler(gen_conv)
 
-    # Add other command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
@@ -614,7 +642,6 @@ def main() -> None:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     
-    # Add other callback handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_source', text="Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_target', text="Please send the target bot username."), pattern="^set_target$"))
@@ -624,10 +651,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
-    # FIX 1: Restore the standalone handler to ensure the button entry point is registered reliably
     application.add_handler(CallbackQueryHandler(generate_command, pattern="^call_generate$"))
     
-    # FIX 2: Add the general text handler to a lower priority group (higher number)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
     logger.info("Bot is starting polling...")
