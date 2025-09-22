@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.6 - Final)
+#          (Definitive Version v3.7 - Final)
 
 import os
 import asyncio
@@ -445,37 +445,52 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if user_id_to_pause not in active_userbots:
             await update.message.reply_text("User ID not found or bot is not active.")
             return
-        
+
+        pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
+        context.bot_data[pause_id] = False  # False means notifications not paused yet
+
         paused_forwarding.add(user_id_to_pause)
-        keyboard = [[InlineKeyboardButton("Pause Notifications (5 min)", callback_data="pause_notify")]]
-        await update.message.reply_text(f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
-                                        reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        keyboard = [[InlineKeyboardButton("Pause Notifications (5 min)", callback_data=f"pause_notify_{pause_id}")]]
+        message = await update.message.reply_text(f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
+                                                  reply_markup=InlineKeyboardMarkup(keyboard))
         
         await asyncio.sleep(300)
+
+        # Resume logic
         if user_id_to_pause in paused_forwarding:
             paused_forwarding.discard(user_id_to_pause)
-            logger.info(f"Resumed forwarding for user ID {user_id_to_pause}.")
-            await context.bot.send_message(OWNER_ID, f"Resumed forwarding for user ID {user_id_to_pause}.")
+            resumed_text = f"Resumed forwarding for user ID {user_id_to_pause}."
+            if context.bot_data.get(pause_id): # If notifications were paused
+                paused_notifications.discard(OWNER_ID)
+                resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_pause}."
+            
+            logger.info(resumed_text)
+            await context.bot.send_message(OWNER_ID, resumed_text)
+            await message.edit_text(f"<i>Pause ended for user ID {user_id_to_pause}.</i>", parse_mode=ParseMode.HTML)
+            del context.bot_data[pause_id]
+
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /temp <user_id>")
 
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    pause_id = query.data.split("_")[2]
+
+    if pause_id not in context.bot_data:
+        await query.answer("This pause has expired.", show_alert=True)
+        await query.edit_message_text(f"{query.message.text}\n\n<i>This pause has expired.</i>", parse_mode=ParseMode.HTML)
+        return
+
     await query.answer()
-    
     paused_notifications.add(OWNER_ID)
-    original_text = query.message.text
+    context.bot_data[pause_id] = True # Mark that notifications were paused for this event
+    
     await query.edit_message_text(
-        f"{original_text}\n\n<i>✅ Notifications have been paused for 5 minutes.</i>",
+        f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
         parse_mode=ParseMode.HTML
     )
-    
-    await asyncio.sleep(300)
-    if OWNER_ID in paused_notifications:
-        paused_notifications.discard(OWNER_ID)
-        logger.info("Resumed notifications.")
-        await context.bot.send_message(OWNER_ID, "Resumed notifications.")
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -513,7 +528,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- Main Runner ---
-async def main() -> None:
+def main() -> None:
     """Configures and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -543,7 +558,7 @@ async def main() -> None:
     application.add_handler(gen_conv)
 
     # Callback Handlers
-    application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify$"))
+    application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_source', text="Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_target', text="Please send the target bot username."), pattern="^set_target$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_single_account', text="Please paste the session string."), pattern="^add_single$"))
@@ -551,20 +566,18 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
-    application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
+    application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
     application.add_handler(CallbackQueryHandler(generate_command, pattern="^call_generate$"))
     
     # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
     # Run application
-    try:
-        await application.initialize()
-        await start_all_userbots_from_db(application)
-        logger.info("Bot is starting...")
-        await application.run_polling()
-    finally:
-        await application.shutdown()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_all_userbots_from_db(application))
+
+    logger.info("Bot is starting...")
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
