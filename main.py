@@ -13,6 +13,7 @@ import asyncio
 import logging
 import random
 import string
+import re
 from datetime import datetime
 from functools import partial
 from pymongo import MongoClient
@@ -70,14 +71,21 @@ def escape_html(text: str) -> str:
 
 # --- Userbot Core Logic ---
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
-    client = PyrogramClient(
-        name=f"userbot_{random.randint(1000, 9999)}",
-        api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-        device_model="Hexagram",
-        system_version="1.7.3",
-        app_version="1.7.3",
-        lang_code="en"
-    )
+    logger.info(f"Attempting to start userbot with session string of length {len(session_string)}.")
+    logger.info(f"Session string start: {session_string[:10]}... end: {session_string[-10:]}")
+    try:
+        client = PyrogramClient(
+            name=f"userbot_{random.randint(1000, 9999)}",
+            api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
+            device_model="Hexagram",
+            system_version="1.7.3",
+            app_version="1.7.3",
+            lang_code="en"
+        )
+    except Exception as e:
+        logger.error(f"Error initializing PyrogramClient: {e}")
+        return "invalid_string", None
+
     try:
         await client.start()
         me = await client.get_me()
@@ -247,7 +255,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # Session generation is handled by ConversationHandler, so we ignore those states here
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')):
         return
 
@@ -269,14 +276,19 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_command(update, context)
 
     elif step == 'awaiting_single_account':
-        # FIX: More robustly clean the input string to remove all whitespace.
-        session_string = "".join(update.message.text.split())
+        session_string = re.sub(r'\s+', '', update.message.text)
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
-        if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
-        elif status == "already_exists": await msg.edit_text("⚠️ Account already exists.")
-        elif status == "account_restricted": await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
-        else: await msg.edit_text("❌ Invalid session string.")
+        if status == "success":
+            await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
+        elif status == "already_exists":
+            await msg.edit_text("⚠️ Account already exists.")
+        elif status == "account_restricted":
+            await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
+        elif status == "invalid_string":
+            await msg.edit_text("❌ <b>Error:</b> The session string is structurally invalid. Please re-generate and copy it carefully.", parse_mode=ParseMode.HTML)
+        else:
+            await msg.edit_text("❌ Invalid session string.")
         await asyncio.sleep(2)
         await add_command(update, context)
 
@@ -303,13 +315,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Session Generator ---
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Starts the session generation conversation."""
     message = update.message or update.callback_query.message
     await message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
     return PHONE
 
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles receiving the phone number."""
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
@@ -443,12 +453,10 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     started, total = await start_all_userbots_from_db(context.application, update_info=True)
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
 
-# --- Health Check Server & Main Runner ---
+# --- Main Runner ---
 def main():
-    """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Conversation handler for the session generator
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
@@ -463,7 +471,6 @@ def main():
         conversation_timeout=300
     )
     
-    # Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
     application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
@@ -473,19 +480,16 @@ def main():
     application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
     application.add_handler(gen_conv)
 
-    # Callback Handlers for simple state setting
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please paste the session string."), pattern="^add_single$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please paste all session strings."), pattern="^add_multiple$"))
 
-    # Other Callback Handlers
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
     application.add_handler(CallbackQueryHandler(lambda u,c: add_command(u, c), pattern="^call_add_command$"))
     
-    # Main text handler for processing state-based inputs
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     logger.info("Bot is starting...")
