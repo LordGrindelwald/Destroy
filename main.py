@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v2.5 - Final Fix)
+#          (Definitive Version v2.9 - Final)
 
 import os
 import asyncio
@@ -19,7 +19,7 @@ from functools import partial
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
-from pyrogram import Client as PyrogramClient
+from pyrogram import Client as PyrogramClient, filters as PyrogramFilters
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
     SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
@@ -62,7 +62,7 @@ paused_forwarding = set()
 paused_notifications = set()
 
 # --- State definitions for ConversationHandler ---
-PHONE, CODE, PASSWORD = range(3)
+PHONE, CODE, PASSWORD, ADD_ACCOUNT = range(4)
 
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
@@ -71,13 +71,7 @@ def escape_html(text: str) -> str:
 
 def clean_session_string(session_string: str) -> str:
     """Thoroughly cleans the session string."""
-    # Remove all whitespace and control characters
-    cleaned_string = re.sub(r'[\s\x00-\x1f\x7f-\x9f]', '', session_string)
-    # Ensure correct base64 padding
-    padding = len(cleaned_string) % 4
-    if padding != 0:
-        cleaned_string += "=" * (4 - padding)
-    return cleaned_string
+    return re.sub(r'[\s\x00-\x1f\x7f-\x9f]', '', session_string)
 
 # --- Userbot Core Logic ---
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
@@ -91,7 +85,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             lang_code="en"
         )
     except Exception as e:
-        logger.error(f"Error initializing PyrogramClient, likely a malformed session string: {e}")
+        logger.error(f"Error initializing PyrogramClient: {e}")
         return "invalid_string", None
 
     try:
@@ -102,7 +96,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             return "already_exists", None
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        client.add_handler(PyrogramMessageHandler(handler_with_context, filters=~filters.service))
+        client.add_handler(PyrogramMessageHandler(handler_with_context, filters=PyrogramFilters.private & ~PyrogramFilters.service))
         
         active_userbots[me.id] = client
         
@@ -121,26 +115,58 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
         return "error", None
 
 async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: Application):
-    if client.me.id in paused_notifications: return
     source_chat_id = await get_source_chat()
-    if message.chat.id == source_chat_id:
-        try:
-            target_chat = await get_target_chat()
-            is_forwarding_paused = client.me.id in paused_forwarding
-            if not is_forwarding_paused:
-                if target_chat:
-                    if random.random() < 0.90: await message.forward(chat_id=target_chat)
-                    else: await message.copy(chat_id=target_chat)
-                    status_text = "✅ Forwarded"
-                else: status_text = "⚠️ Not Forwarded (No Target Set)"
-            else: status_text = "⏸️ Paused (Forwarding Only)"
-            content = message.text or message.caption or "(Media without caption)"
-            header = f"👤 <b>{escape_html(client.me.first_name)}</b>"
-            notification_text = (f"{header}\n<b>Status:</b> {status_text}\n\n<b>Content:</b>\n<code>{escape_html(content[:3000])}</code>")
-            await ptb_app.bot.send_message(OWNER_ID, notification_text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
-            await ptb_app.bot.send_message(OWNER_ID, f"Error processing message: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
+    if message.chat.id != source_chat_id:
+        return
+
+    target_chat = await get_target_chat()
+    if not target_chat:
+        logger.warning("Target chat not set, cannot forward.")
+        return
+
+    asyncio.gather(
+        forward_message(client, message, target_chat),
+        send_notification(client, message, ptb_app)
+    )
+
+async def forward_message(client, message, target_chat):
+    if client.me.id in paused_forwarding:
+        return
+
+    try:
+        if random.random() < 0.90:
+            await message.forward(chat_id=target_chat)
+        else:
+            await message.copy(chat_id=target_chat)
+    except Exception as e:
+        logger.error(f"Failed to forward message {message.id} from {client.me.id}: {e}")
+
+async def send_notification(client, message, ptb_app):
+    if OWNER_ID in paused_notifications:
+        return
+
+    status_parts = []
+    if client.me.id in paused_forwarding:
+        status_parts.append("⏸️ Fwd Paused")
+    else:
+        status_parts.append("✅ Fwd Active")
+
+    if OWNER_ID in paused_notifications:
+        status_parts.append("⏸️ Notify Paused")
+    else:
+        status_parts.append("✅ Notify Active")
+
+    status_text = " | ".join(status_parts)
+    content = message.text or message.caption or "(Media without caption)"
+    header = f"👤 <b>{escape_html(client.me.first_name)}</b>"
+    notification_text = (
+        f"{header}\n<b>Status:</b> {status_text}\n\n"
+        f"<b>Content:</b>\n<code>{escape_html(content[:3000])}</code>"
+    )
+    try:
+        await ptb_app.bot.send_message(OWNER_ID, notification_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Failed to send notification for message {message.id}: {e}")
 
 async def start_all_userbots_from_db(application: Application, update_info: bool = False):
     all_accounts = list(accounts_collection.find())
@@ -153,7 +179,7 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
     
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
-    return config.get("source_chat_id", "Not Set") if config else "Not Set"
+    return config.get("source_chat_id", 777000) if config else 777000
 
 async def get_target_chat():
     config = config_collection.find_one({"_id": "config"})
@@ -211,55 +237,6 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_html(message_text, reply_markup=reply_markup)
 
-async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    accounts = list(accounts_collection.find())
-    text = "👤 <b>Your Managed Accounts:</b>\n\n" if accounts else "No accounts have been added yet."
-    for acc in accounts:
-        first_name = escape_html(acc.get('first_name', 'N/A'))
-        text += f"<b>Name:</b> {first_name}\n<b>ID:</b> <code>{acc.get('user_id', 'N/A')}</code>\n{'-'*25}\n"
-    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-
-async def remove_account_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    accounts = list(accounts_collection.find())
-    if not accounts:
-        await update.message.reply_html("There are no accounts to remove.")
-        return
-    keyboard = []
-    for acc in accounts:
-        user_id = acc.get('user_id')
-        name = escape_html(acc.get('first_name', f"ID: {user_id}"))
-        button = [InlineKeyboardButton(f"🗑️ {name}", callback_data=f"delete_account_{user_id}")]
-        keyboard.append(button)
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="main_settings")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_html("Please select an account to remove:", reply_markup=reply_markup)
-
-async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id_to_delete = int(query.data.split("_")[2])
-    if user_id_to_delete in active_userbots:
-        logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
-        await active_userbots[user_id_to_delete].stop()
-        del active_userbots[user_id_to_delete]
-    result = accounts_collection.delete_one({"user_id": user_id_to_delete})
-    if result.deleted_count > 0:
-        await query.edit_message_text(f"✅ Account <code>{user_id_to_delete}</code> has been successfully removed.", parse_mode=ParseMode.HTML)
-    else:
-        await query.edit_message_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
-    await asyncio.sleep(3)
-    await settings_command(update, context)
-
-async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['next_step'] = step
-    await query.edit_message_text(text)
-
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
@@ -296,35 +273,80 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif status == "account_restricted":
             await msg.edit_text("❌ <b>Error:</b> Login succeeded, but this account is restricted.", parse_mode=ParseMode.HTML)
         elif status == "invalid_string":
-            await msg.edit_text("❌ <b>Error:</b> The session string is invalid or corrupted. Please generate a new one.", parse_mode=ParseMode.HTML)
+            await msg.edit_text("❌ <b>Error:</b> The session string is invalid or corrupted.", parse_mode=ParseMode.HTML)
         else:
             await msg.edit_text("❌ An unknown error occurred.")
         
         await asyncio.sleep(3)
         await add_command(update, context)
 
-    elif step == 'awaiting_multiple_accounts':
-        text = update.message.text
-        session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
-        msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
-        success, fail = 0, 0
-        for session in session_strings:
-            status, _ = await start_userbot(session, context.application, update_info=True)
-            if status == "success": success += 1
-            else: fail += 1
-        await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
-        await asyncio.sleep(2)
-        await add_command(update, context)
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source_chat = await get_source_chat()
+    target_chat = await get_target_chat() or "Not Set"
+    running_bots = len(active_userbots)
+    total_bots = accounts_collection.count_documents({})
+    
+    status_text = (f"📊 <b>Bot Status</b>\n\n"
+        f"<b>Management Bot:</b> Online\n"
+        f"<b>Source Chat:</b> <code>{source_chat}</code>\n"
+        f"<b>Target Chat:</b> <code>{escape_html(target_chat)}</code>\n"
+        f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n"
+        f"<b>Paused Forwarding:</b> {len(paused_forwarding)} bots\n"
+        f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
+    await update.message.reply_html(status_text)
+    
+async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id_to_pause = int(context.args[0])
+        if user_id_to_pause not in active_userbots:
+            await update.message.reply_text("User ID not found or bot is not active.")
+            return
+        
+        paused_forwarding.add(user_id_to_pause)
+        
+        keyboard = [[InlineKeyboardButton("Pause Notifications (5 min)", callback_data="pause_notify")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
+            reply_markup=reply_markup
+        )
+        
+        await asyncio.sleep(300)
+        paused_forwarding.discard(user_id_to_pause)
+        logger.info(f"Resumed forwarding for user ID {user_id_to_pause}.")
+        await context.bot.send_message(OWNER_ID, f"Resumed forwarding for user ID {user_id_to_pause}.")
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'temp_client' in context.user_data:
-        client = context.user_data.get('temp_client')
-        if client and client.is_connected: await client.disconnect()
-    context.user_data.clear()
-    await update.message.reply_text("Action cancelled.")
-    return ConversationHandler.END
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /temp <user_id>")
 
-# --- Session Generator ---
+async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    
+    paused_notifications.add(OWNER_ID)
+    await query.answer("✅ Notifications paused for 5 minutes.", show_alert=True)
+    
+    await query.edit_message_reply_markup(reply_markup=None)
+    
+    await asyncio.sleep(300)
+    paused_notifications.discard(OWNER_ID)
+    logger.info("Resumed notifications.")
+    await context.bot.send_message(OWNER_ID, "Resumed notifications.")
+
+async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for user_id in active_userbots.keys():
+        paused_forwarding.add(user_id)
+    paused_notifications.add(OWNER_ID)
+    
+    await update.message.reply_text("✅ Paused all forwarding and notifications for 5 minutes.")
+    
+    await asyncio.sleep(300)
+    
+    paused_forwarding.clear()
+    paused_notifications.discard(OWNER_ID)
+    logger.info("Resumed all forwarding and notifications.")
+    await context.bot.send_message(OWNER_ID, "Resumed all forwarding and notifications.")
+
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
     await message.reply_text("Starting session generator...\nPlease send the phone number in international format (e.g., +1234567890).")
@@ -333,7 +355,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
-    # FIX: Use a consistent client name for generation
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=API_ID, api_hash=API_HASH, in_memory=True,
@@ -345,32 +366,24 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
     except asyncio.TimeoutError:
-        await msg.edit_text("❌ <b>Error:</b> Connection to Telegram timed out. The server might be busy or your API keys might be wrong. Cancelled.")
+        await msg.edit_text("❌ <b>Error:</b> Connection to Telegram timed out. Cancelled.")
         return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error during client.connect(): {e}")
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>\nCancelled.")
         return ConversationHandler.END
 
     try:
         await msg.edit_text("⏳ Sending login code...")
         sent_code = await client.send_code(phone)
-        context.user_data['phone'] = phone
-        context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-        context.user_data['temp_client'] = client
+        context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
         await msg.edit_text("A login code has been sent to your Telegram account. Please send it here.")
         return CODE
-    except ApiIdInvalid:
-        await msg.edit_text("❌ <b>CRITICAL ERROR:</b> The `API_ID` and `API_HASH` are invalid. Please check your environment variables. Process cancelled.")
-        await client.disconnect()
-        return ConversationHandler.END
-    except PhoneNumberInvalid:
-        await msg.edit_text("❌ <b>Error:</b> The phone number is invalid. Process cancelled.")
+    except (ApiIdInvalid, PhoneNumberInvalid) as e:
+        await msg.edit_text(f"❌ <b>Error:</b> {e}. Process cancelled.")
         await client.disconnect()
         return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error during client.send_code(): {e}")
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>\nThis can happen if the API keys are incorrect. Process cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
 
@@ -383,31 +396,21 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.sign_in(phone, phone_code_hash, code)
         session_string = await client.export_session_string()
+        context.user_data['session_string'] = session_string
         
-        await msg.edit_text("✅ **Success!** Session string generated. Now adding account...")
-        # Since we are using the same client, we can get user info directly
-        me = await client.get_me()
+        keyboard = [[InlineKeyboardButton("Add Account", callback_data="add_account")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        account_info = {
-            "user_id": me.id, "first_name": me.first_name, "username": me.username,
-            "phone_number": me.phone_number, "session_string": session_string,
-        }
-        accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
-        active_userbots[me.id] = client # The client is already started and logged in
-        
-        await msg.reply_html(f"✅ Account added automatically: {escape_html(me.first_name)}\n\nYour session string (for backup):\n<code>{session_string}</code>")
-        
-        return ConversationHandler.END
+        await msg.reply_html(
+            f"✅ Session generated successfully!\n\n<code>{session_string}</code>",
+            reply_markup=reply_markup
+        )
+        return ADD_ACCOUNT
     except SessionPasswordNeeded:
         await msg.edit_text("2FA is enabled. Please send your password.")
         return PASSWORD
-    except (PhoneCodeInvalid, PhoneCodeExpired):
-        await msg.edit_text("❌ <b>Error:</b> Invalid or expired code. Cancelled.")
-        if client.is_connected: await client.disconnect()
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error during login code stage: {e}")
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+    except (PhoneCodeInvalid, PhoneCodeExpired) as e:
+        await msg.edit_text(f"❌ <b>Error:</b> {e}. Cancelled.")
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
     finally:
@@ -420,31 +423,40 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.check_password(password)
         session_string = await client.export_session_string()
-        
-        await msg.edit_text("✅ **Success!** Session string generated. Now adding account...")
-        me = await client.get_me()
-        
-        account_info = {
-            "user_id": me.id, "first_name": me.first_name, "username": me.username,
-            "phone_number": me.phone_number, "session_string": session_string,
-        }
-        accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
-        active_userbots[me.id] = client
+        context.user_data['session_string'] = session_string
 
-        await msg.reply_html(f"✅ Account added automatically: {escape_html(me.first_name)}\n\nYour session string (for backup):\n<code>{session_string}</code>")
+        keyboard = [[InlineKeyboardButton("Add Account", callback_data="add_account")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
+        await msg.reply_html(
+            f"✅ Session generated successfully!\n\n<code>{session_string}</code>",
+            reply_markup=reply_markup
+        )
+        return ADD_ACCOUNT
     except PasswordHashInvalid:
         await msg.edit_text("❌ <b>Error:</b> Incorrect password. Cancelled.")
-        if client.is_connected: await client.disconnect()
-    except Exception as e:
-        logger.error(f"Error during 2FA stage: {e}")
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
         if client.is_connected: await client.disconnect()
     finally:
         await update.message.delete()
     return ConversationHandler.END
 
-# --- Independent Commands ---
+async def add_account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    session_string = context.user_data.get('session_string')
+    
+    if not session_string:
+        await query.answer("Session string not found. Please generate again.", show_alert=True)
+        return ConversationHandler.END
+
+    status, user_info = await start_userbot(session_string, context.application, update_info=True)
+    
+    if status == "success":
+        await query.edit_message_text(f"✅ Account added: {escape_html(user_info.first_name)}")
+    else:
+        await query.edit_message_text(f"⚠️ Error adding account: {status}")
+        
+    return ConversationHandler.END
+
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = datetime.now()
     message = await update.message.reply_text("Pinging...")
@@ -452,68 +464,67 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     latency = (end_time - start_time).microseconds / 1000
     await message.edit_text(f"🏓 Pong!\nLatency: {latency:.2f} ms")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source_chat = await get_source_chat()
-    target_chat = await get_target_chat() or "Not Set"
-    running_bots = len(active_userbots)
-    total_bots = accounts_collection.count_documents({})
-    status_text = (f"📊 <b>Bot Status</b>\n\n"
-        f"<b>Management Bot:</b> Online\n"
-        f"<b>Source Chat:</b> <code>{source_chat}</code>\n"
-        f"<b>Target Chat:</b> <code>{escape_html(target_chat)}</code>\n"
-        f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n")
-    await update.message.reply_html(status_text)
-    
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all userbots...")
     for uid, client in list(active_userbots.items()):
         await client.stop()
         del active_userbots[uid]
-    await msg.edit_text("🔄 Restarting and refreshing details...")
+    
+    await msg.edit_text("🔄 Restarting and refreshing userbot details...")
     started, total = await start_all_userbots_from_db(context.application, update_info=True)
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'temp_client' in context.user_data:
+        client = context.user_data.get('temp_client')
+        if client and client.is_connected: await client.disconnect()
+    context.user_data.clear()
+    await update.message.reply_text("Action cancelled.")
+    return ConversationHandler.END
+
 # --- Main Runner ---
 def main():
+    """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
     gen_conv = ConversationHandler(
         entry_points=[
             CommandHandler("generate", lambda u, c: owner_only(u, c, generate_command)),
-            CallbackQueryHandler(lambda u,c: generate_command(u.callback_query, c), pattern="^call_generate$")
+            CallbackQueryHandler(lambda u, c: generate_command(u.callback_query, c), pattern="^call_generate$")
         ],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
             PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_2fa_password)],
+            ADD_ACCOUNT: [CallbackQueryHandler(add_account_callback, pattern="^add_account$")]
         },
-        fallbacks=[CommandHandler("cancel", cancel_command)],
+        fallbacks=[CommandHandler("cancel", lambda u, c: owner_only(u, c, cancel_command))],
         conversation_timeout=300
     )
-    
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", lambda u, c: owner_only(u, c, settings_command)))
     application.add_handler(CommandHandler("add", lambda u, c: owner_only(u, c, add_command)))
-    application.add_handler(CommandHandler("remove", lambda u, c: owner_only(u, c, remove_account_menu)))
-    application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("status", lambda u, c: owner_only(u, c, status_command)))
+    application.add_handler(CommandHandler("temp", lambda u, c: owner_only(u, c, temp_pause_command)))
+    application.add_handler(CommandHandler("temp_fwd", lambda u, c: owner_only(u, c, temp_pause_all)))
+    application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", lambda u, c: owner_only(u, c, refresh_command)))
+    application.add_handler(CommandHandler("cancel", lambda u, c: owner_only(u, c, cancel_command)))
     application.add_handler(gen_conv)
 
+    application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern="^pause_notify$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_source', "Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_target', "Please send the target bot username."), pattern="^set_target$"))
     application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_single_account', "Please paste the session string."), pattern="^add_single$"))
-    application.add_handler(CallbackQueryHandler(lambda u,c: set_next_step(u, c, 'awaiting_multiple_accounts', "Please paste all session strings."), pattern="^add_multiple$"))
-
-    application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
-    application.add_handler(CallbackQueryHandler(lambda u,c: settings_command(u,c), pattern="^main_settings$"))
-    application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
-    application.add_handler(CallbackQueryHandler(lambda u,c: add_command(u, c), pattern="^call_add_command$"))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_all_userbots_from_db(application))
 
     logger.info("Bot is starting...")
     application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
