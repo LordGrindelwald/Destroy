@@ -124,8 +124,16 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             }
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
         return "success", me
+    except (AuthKeyUnregistered, UserDeactivated) as e:
+        logger.error(f"Userbot session is invalid or account deleted for session string ending in ...{session_string[-4:]}: {e}")
+        if client.is_connected: await client.stop()
+        return "invalid_string", None
+    except ApiIdInvalid as e:
+        logger.error(f"API_ID or API_HASH is invalid: {e}")
+        if client.is_connected: await client.stop()
+        return "api_id_invalid", None
     except Exception as e:
-        logger.error(f"An unexpected error in start_userbot: {e}")
+        logger.error(f"An unexpected error occurred in start_userbot for session string ending in ...{session_string[-4:]}: {e}", exc_info=True)
         if "AUTH_KEY_PERM_EMPTY" in str(e): return "account_restricted", None
         if "SESSION_STRING_INVALID" in str(e).upper(): return "invalid_string", None
         if client.is_connected: await client.stop()
@@ -536,6 +544,10 @@ def main() -> None:
     """Configures and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # This is the new, correct way to run your async startup function.
+    # It runs after the application is initialized but before polling starts.
+    application.post_init = partial(start_all_userbots_from_db, application)
+
     gen_conv = ConversationHandler(
         entry_points=[CommandHandler("generate", generate_command)],
         states={
@@ -576,10 +588,6 @@ def main() -> None:
     # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
-    # Initialize userbots before polling
-    logger.info("Initializing userbots...")
-    asyncio.run(start_all_userbots_from_db(application))
-
     logger.info("Bot is starting polling...")
     application.run_polling()
 
