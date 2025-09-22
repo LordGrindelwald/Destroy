@@ -6,13 +6,14 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.9 - Final)
+#          (Definitive Version v4.2 - Final)
 
 import os
 import asyncio
 import logging
 import random
 import re
+import traceback
 from datetime import datetime
 from functools import partial, wraps
 from pymongo import MongoClient
@@ -22,7 +23,7 @@ from pyrogram import Client as PyrogramClient, filters as PyrogramFilters
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated,
     SessionPasswordNeeded, PhoneNumberInvalid, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid,
-    ApiIdInvalid
+    ApiIdInvalid, FloodWait
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -96,25 +97,28 @@ def owner_only(func):
 
 # --- Userbot Core Logic ---
 async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
+    session_name = f"userbot_{random.randint(1000, 9999)}"
+    me = None
     try:
         client = PyrogramClient(
-            name=f"userbot_{random.randint(1000, 9999)}",
+            name=session_name,
             api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
             device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3", app_version="4.8.3", lang_code="en"
         )
     except Exception as e:
-        logger.error(f"Error initializing PyrogramClient: {e}")
-        return "invalid_string", None
+        logger.error(f"Error initializing PyrogramClient for session ending ...{session_string[-4:]}: {e}")
+        return "init_failed", None, f"Client Init Error: {e}"
 
+    error_detail = "An unknown error occurred."
     try:
         await client.start()
         me = await client.get_me()
         if me.id in active_userbots:
             await client.stop()
-            return "already_exists", None
+            return "already_exists", None, "This user is already running."
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        client.add_handler(PyrogramMessageHandler(handler_with_context, filters=PyrogramFilters.private & ~PyrogramFilters.service))
+        client.add_handler(PyrogramMessageHandler(handler_with_context, PyrogramFilters.private & ~PyrogramFilters.service))
         active_userbots[me.id] = client
         
         if update_info:
@@ -123,21 +127,33 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
                 "phone_number": me.phone_number, "session_string": session_string,
             }
             accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
-        return "success", me
-    except (AuthKeyUnregistered, UserDeactivated) as e:
-        logger.error(f"Userbot session is invalid or account deleted for session string ending in ...{session_string[-4:]}: {e}")
-        if client.is_connected: await client.stop()
-        return "invalid_string", None
-    except ApiIdInvalid as e:
-        logger.error(f"API_ID or API_HASH is invalid: {e}")
-        if client.is_connected: await client.stop()
-        return "api_id_invalid", None
+        return "success", me, "Successfully started."
+    
+    except (AuthKeyUnregistered, UserDeactivated):
+        error_detail = "Session string has expired or been revoked. Please generate a new one."
+        logger.error(f"AuthKeyUnregistered/UserDeactivated for session ending ...{session_string[-4:]}. {error_detail}")
+        return "invalid_session", None, error_detail
+    except (ApiIdInvalid, TypeError):
+        error_detail = "Your API_ID or API_HASH is invalid. Please check your environment variables."
+        logger.error(f"API ID/Hash Error. {error_detail}")
+        return "api_id_invalid", None, error_detail
+    except FloodWait as e:
+        error_detail = f"Flood wait of {e.value} seconds. Too many login attempts."
+        logger.warning(f"FloodWait for session ending ...{session_string[-4:]}: {e}")
+        return "flood_wait", None, error_detail
     except Exception as e:
-        logger.error(f"An unexpected error occurred in start_userbot for session string ending in ...{session_string[-4:]}: {e}", exc_info=True)
-        if "AUTH_KEY_PERM_EMPTY" in str(e): return "account_restricted", None
-        if "SESSION_STRING_INVALID" in str(e).upper(): return "invalid_string", None
-        if client.is_connected: await client.stop()
-        return "error", None
+        full_traceback = traceback.format_exc()
+        logger.error(f"An unexpected error in start_userbot for session ending ...{session_string[-4:]}: {e}\n{full_traceback}")
+        if "SESSION_STRING_INVALID" in str(e).upper():
+            error_detail = "The session string format is invalid."
+            return "invalid_session", None, error_detail
+        error_detail = f"Unexpected Error: {e}"
+        return "error", None, error_detail
+    finally:
+        if 'client' in locals() and client.is_connected:
+            is_active = me and me.id in active_userbots
+            if not is_active:
+                await client.stop()
 
 async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: Application):
     source_chat_id = await get_source_chat()
@@ -178,13 +194,22 @@ async def send_notification(client, message, ptb_app):
 
 async def start_all_userbots_from_db(application: Application, update_info: bool = False):
     all_accounts = list(accounts_collection.find())
-    count = 0
-    for account in all_accounts:
-        status, _ = await start_userbot(account["session_string"], application, update_info=update_info)
-        if status == "success": count += 1
-    logger.info(f"Started {count}/{len(all_accounts)} userbots.")
-    return count, len(all_accounts)
+    success_count = 0
+    error_details = []
     
+    for account in all_accounts:
+        session_str = account.get("session_string", "")
+        if not session_str: continue
+        
+        status, _, detail = await start_userbot(session_str, application, update_info=update_info)
+        if status == "success":
+            success_count += 1
+        else:
+            acc_id = account.get('first_name') or account.get('user_id') or f"...{session_str[-4:]}"
+            error_details.append(f"• <b>{escape_html(acc_id)}:</b> {escape_html(detail)}")
+
+    return success_count, len(all_accounts), error_details
+
 async def get_source_chat():
     config = config_collection.find_one({"_id": "config"})
     return config.get("source_chat_id", 777000) if config else 777000
@@ -329,11 +354,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'awaiting_single_account':
         session_string = clean_session_string(update.message.text)
         msg = await update.message.reply_text("⏳ Processing...")
-        status, user_info = await start_userbot(session_string, context.application, update_info=True)
+        status, user_info, detail = await start_userbot(session_string, context.application, update_info=True)
         if status == "success":
             await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
         else:
-            await msg.edit_text(f"⚠️ Error adding account: {status}")
+            await msg.edit_text(f"⚠️ Error adding account: {detail}")
         await asyncio.sleep(3); await settings_command(update, context)
     elif step == 'awaiting_multiple_accounts':
         text = update.message.text
@@ -341,7 +366,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
         success, fail = 0, 0
         for session in session_strings:
-            status, _ = await start_userbot(session, context.application, update_info=True)
+            status, _, _ = await start_userbot(session, context.application, update_info=True)
             if status == "success": success += 1
             else: fail += 1
         await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
@@ -365,7 +390,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
     except Exception as e:
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>\nCancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>\nCancelled.", parse_mode=ParseMode.HTML)
         return ConversationHandler.END
     try:
         sent_code = await client.send_code(phone)
@@ -373,7 +398,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("A login code has been sent to your Telegram account. Please send it here.")
         return CODE
     except Exception as e:
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
 
@@ -394,7 +419,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("2FA is enabled. Please send your password.")
         return PASSWORD
     except Exception as e:
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
 
@@ -411,23 +436,26 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.delete()
         return ADD_ACCOUNT
     except Exception as e:
-        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.")
+        await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
         if client.is_connected: await client.disconnect()
         return ConversationHandler.END
 
 @owner_only
 async def add_account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
     session_string = context.user_data.get('session_string')
     if not session_string:
         await query.answer("Session string not found. Please generate again.", show_alert=True)
         return ConversationHandler.END
 
-    status, user_info = await start_userbot(session_string, context.application, update_info=True)
+    status, user_info, detail = await start_userbot(session_string, context.application, update_info=True)
     if status == "success":
-        await query.edit_message_text(f"✅ Account added: {escape_html(user_info.first_name)}")
+        await query.edit_message_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
     else:
-        await query.edit_message_text(f"⚠️ Error adding account: {status}")
+        await query.edit_message_text(f"⚠️ Error adding account: {detail}", parse_mode=ParseMode.HTML)
+    
+    context.user_data.clear()
     return ConversationHandler.END
 
 # --- Independent Commands ---
@@ -521,14 +549,27 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all userbots...")
     for uid, client in list(active_userbots.items()):
-        await client.stop()
-        del active_userbots[uid]
+        if client.is_connected:
+            await client.stop()
+    active_userbots.clear()
     
-    await asyncio.sleep(2) # Add a small delay to prevent race conditions
+    await asyncio.sleep(2)
 
     await msg.edit_text("🔄 Restarting and refreshing userbot details...")
-    started, total = await start_all_userbots_from_db(context.application, update_info=True)
-    await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
+    started, total, errors = await start_all_userbots_from_db(context.application, update_info=True)
+    
+    final_message = f"✅ <b>Refresh Complete</b>\nStarted {started}/{total} userbots."
+    if errors:
+        error_message = "\n\n❌ <b>Errors Encountered:</b>\n" + "\n".join(errors)
+        if len(final_message) + len(error_message) > 4096:
+            await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+            await update.message.reply_html(error_message)
+        else:
+            final_message += error_message
+            await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+    else:
+        await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -543,13 +584,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main() -> None:
     """Configures and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # This is the new, correct way to run your async startup function.
-    # It runs after the application is initialized but before polling starts.
+    
     application.post_init = partial(start_all_userbots_from_db, application)
 
     gen_conv = ConversationHandler(
-        entry_points=[CommandHandler("generate", generate_command)],
+        entry_points=[CommandHandler("generate", generate_command), CallbackQueryHandler(generate_command, pattern="^call_generate$")],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
@@ -560,7 +599,10 @@ def main() -> None:
         conversation_timeout=300,
     )
 
-    # Command Handlers
+    # Add conversation handler with priority
+    application.add_handler(gen_conv)
+
+    # Add other command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
@@ -571,9 +613,8 @@ def main() -> None:
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(gen_conv)
-
-    # Callback Handlers
+    
+    # Add other callback handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_source', text="Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_target', text="Please send the target bot username."), pattern="^set_target$"))
@@ -583,10 +624,11 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
+    # FIX 1: Restore the standalone handler to ensure the button entry point is registered reliably
     application.add_handler(CallbackQueryHandler(generate_command, pattern="^call_generate$"))
     
-    # Text Handler
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+    # FIX 2: Add the general text handler to a lower priority group (higher number)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
     logger.info("Bot is starting polling...")
     application.run_polling()
