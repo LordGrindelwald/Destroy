@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.7 - Final)
+#          (Definitive Version v3.9 - Final)
 
 import os
 import asyncio
@@ -447,21 +447,20 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
-        context.bot_data[pause_id] = False  # False means notifications not paused yet
+        context.bot_data[pause_id] = False
 
         paused_forwarding.add(user_id_to_pause)
         
-        keyboard = [[InlineKeyboardButton("Pause Notifications (5 min)", callback_data=f"pause_notify_{pause_id}")]]
+        keyboard = [[InlineKeyboardButton("Pause Notifications", callback_data=f"pause_notify_{pause_id}")]]
         message = await update.message.reply_text(f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
                                                   reply_markup=InlineKeyboardMarkup(keyboard))
         
         await asyncio.sleep(300)
 
-        # Resume logic
         if user_id_to_pause in paused_forwarding:
             paused_forwarding.discard(user_id_to_pause)
             resumed_text = f"Resumed forwarding for user ID {user_id_to_pause}."
-            if context.bot_data.get(pause_id): # If notifications were paused
+            if context.bot_data.get(pause_id):
                 paused_notifications.discard(OWNER_ID)
                 resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_pause}."
             
@@ -485,7 +484,7 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
 
     await query.answer()
     paused_notifications.add(OWNER_ID)
-    context.bot_data[pause_id] = True # Mark that notifications were paused for this event
+    context.bot_data[pause_id] = True
     
     await query.edit_message_text(
         f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
@@ -513,7 +512,12 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all userbots...")
-    for uid, client in list(active_userbots.items()): await client.stop(); del active_userbots[uid]
+    for uid, client in list(active_userbots.items()):
+        await client.stop()
+        del active_userbots[uid]
+    
+    await asyncio.sleep(2) # Add a small delay to prevent race conditions
+
     await msg.edit_text("🔄 Restarting and refreshing userbot details...")
     started, total = await start_all_userbots_from_db(context.application, update_info=True)
     await msg.edit_text(f"✅ Refresh complete. Started {started}/{total} userbots.")
@@ -572,11 +576,11 @@ def main() -> None:
     # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
-    # Run application
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_all_userbots_from_db(application))
+    # Initialize userbots before polling
+    logger.info("Initializing userbots...")
+    asyncio.run(start_all_userbots_from_db(application))
 
-    logger.info("Bot is starting...")
+    logger.info("Bot is starting polling...")
     application.run_polling()
 
 if __name__ == "__main__":
