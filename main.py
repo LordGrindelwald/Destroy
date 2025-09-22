@@ -269,7 +269,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_command(update, context)
 
     elif step == 'awaiting_single_account':
-        session_string = update.message.text.strip()
+        # FIX: More robustly clean the input string to remove all whitespace.
+        session_string = "".join(update.message.text.split())
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info = await start_userbot(session_string, context.application, update_info=True)
         if status == "success": await msg.edit_text(f"✅ Account added: {escape_html(user_info.first_name)}", parse_mode=ParseMode.HTML)
