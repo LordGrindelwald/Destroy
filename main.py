@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v4.3 - Final)
+#          (Definitive Version v4.4 - Stable)
 
 import os
 import asyncio
@@ -475,8 +475,37 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
+# --- NEW NON-BLOCKING PAUSE COMMANDS ---
+
+async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback to resume forwarding for a single user."""
+    job_data = context.job.data
+    user_id_to_resume = job_data['user_id']
+    pause_id = job_data['pause_id']
+    message_id = job_data['message_id']
+    
+    paused_forwarding.discard(user_id_to_resume)
+    resumed_text = f"Resumed forwarding for user ID {user_id_to_resume}."
+    
+    if context.bot_data.get(pause_id): # Check if notifications were also paused
+        paused_notifications.discard(OWNER_ID)
+        resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_resume}."
+    
+    logger.info(resumed_text)
+    await context.bot.send_message(OWNER_ID, resumed_text)
+    try:
+        await context.bot.edit_message_text(chat_id=OWNER_ID, message_id=message_id, 
+                                            text=f"<i>Pause ended for user ID {user_id_to_resume}.</i>", 
+                                            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass # Message might have been deleted, ignore error
+    
+    if pause_id in context.bot_data:
+        del context.bot_data[pause_id]
+
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses a single userbot using the job queue."""
     try:
         user_id_to_pause = int(context.args[0])
         if user_id_to_pause not in active_userbots:
@@ -484,7 +513,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
-        context.bot_data[pause_id] = False
+        context.bot_data[pause_id] = False # False means notifications are NOT paused by default
 
         paused_forwarding.add(user_id_to_pause)
         
@@ -494,7 +523,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         context.application.job_queue.run_once(
             callback=resume_forwarding_job,
-            when=300,
+            when=300, # 5 minutes
             data={'user_id': user_id_to_pause, 'pause_id': pause_id, 'message_id': message.message_id},
             name=f"resume_{pause_id}"
         )
@@ -502,70 +531,48 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /temp <user_id>")
 
-async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
-    job_data = context.job.data
-    user_id_to_resume = job_data['user_id']
-    pause_id = job_data['pause_id']
-    message_id = job_data['message_id']
-    
-    if user_id_to_resume in paused_forwarding:
-        paused_forwarding.discard(user_id_to_resume)
-        resumed_text = f"Resumed forwarding for user ID {user_id_to_resume}."
-        
-        if context.bot_data.get(pause_id): # Check if notifications were also paused
-            paused_notifications.discard(OWNER_ID)
-            resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_resume}."
-        
-        logger.info(resumed_text)
-        await context.bot.send_message(OWNER_ID, resumed_text)
-        await context.bot.edit_message_text(chat_id=OWNER_ID, message_id=message_id, 
-                                            text=f"<i>Pause ended for user ID {user_id_to_resume}.</i>", 
-                                            parse_mode=ParseMode.HTML)
-        if pause_id in context.bot_data:
-            del context.bot_data[pause_id]
-
-# THIS IS THE FIXED FUNCTION
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback for the 'Pause Notifications' button."""
     query = update.callback_query
     await query.answer()
     
-    # Correctly parse the pause_id from the callback data
     try:
-        parts = query.data.split("_")
-        pause_id = "_".join(parts[2:])
+        pause_id = query.data.split("pause_notify_", 1)[1]
     except IndexError:
         await query.edit_message_text(f"{query.message.text}\n\n<i>Error: Invalid pause data.</i>", parse_mode=ParseMode.HTML)
         return
 
     if pause_id not in context.bot_data:
         await query.answer("This pause has expired or is invalid.", show_alert=True)
-        await query.edit_message_text(f"{query.message.text}\n\n<i>This pause has expired.</i>", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(f"{query.message.text}\n\n<i>This pause has expired.</i>", parse_mode=ParseMode.HTML, reply_markup=None)
         return
 
     paused_notifications.add(OWNER_ID)
-    context.bot_data[pause_id] = True # Mark that notifications were paused
+    context.bot_data[pause_id] = True # True means notifications ARE now paused
     
     await query.edit_message_text(
         f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
         parse_mode=ParseMode.HTML,
-        reply_markup=None # Remove the button after it's clicked
+        reply_markup=None
     )
 
-@owner_only
-async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for user_id in active_userbots.keys(): paused_forwarding.add(user_id)
-    paused_notifications.add(OWNER_ID)
-    await update.message.reply_text("✅ Paused all forwarding and notifications for 5 minutes.")
-    
-    context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
-
 async def resume_all_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback to resume all forwarding and notifications."""
     paused_forwarding.clear()
     paused_notifications.discard(OWNER_ID)
     logger.info("Resumed all forwarding and notifications.")
     await context.bot.send_message(OWNER_ID, "Resumed all forwarding and notifications.")
 
+@owner_only
+async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses all userbots and notifications using the job queue."""
+    for user_id in active_userbots.keys():
+        paused_forwarding.add(user_id)
+    paused_notifications.add(OWNER_ID)
+    await update.message.reply_text("✅ Paused all forwarding and notifications for 5 minutes.")
+    
+    context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
 
 @owner_only
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -586,9 +593,11 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(2)
 
     await msg.edit_text("🔄 Restarting and refreshing userbot details...")
-    started, total, errors = await start_all_userbots_from_db(context.application, update_info=True)
+    _, _, errors = await start_all_userbots_from_db(context.application, update_info=True)
     
-    final_message = f"✅ <b>Refresh Complete</b>\nStarted {started}/{total} userbots."
+    running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
+    final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} userbots."
+
     if errors:
         error_message = "\n\n❌ <b>Errors Encountered:</b>\n" + "\n".join(errors)
         if len(final_message) + len(error_message) > 4096:
@@ -599,7 +608,6 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
     else:
         await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
-
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,7 +623,10 @@ def main() -> None:
     """Configures and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
-    application.post_init = partial(start_all_userbots_from_db, application)
+    async def post_init_task(app: Application):
+        await start_all_userbots_from_db(app)
+
+    application.post_init = post_init_task
 
     gen_conv = ConversationHandler(
         entry_points=[CommandHandler("generate", generate_command), CallbackQueryHandler(generate_command, pattern="^call_generate$")],
@@ -629,8 +640,9 @@ def main() -> None:
         conversation_timeout=300,
     )
 
-    application.add_handler(gen_conv)
+    application.add_handler(gen_conv, group=0)
 
+    # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
@@ -642,6 +654,7 @@ def main() -> None:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     
+    # Add callback handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_source', text="Please send the source chat ID."), pattern="^set_source$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_target', text="Please send the target bot username."), pattern="^set_target$"))
@@ -651,8 +664,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
-    application.add_handler(CallbackQueryHandler(generate_command, pattern="^call_generate$"))
     
+    # Add the general text handler with lower priority
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
     logger.info("Bot is starting polling...")
