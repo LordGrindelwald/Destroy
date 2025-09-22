@@ -11,10 +11,8 @@ services:
     # The command to start your application.
     run_command: python main.py
 
-    # This is the crucial part: it explicitly defines the TCP health check.
-    health_checks:
-      - type: tcp
-        port: 8080 # This matches the default port in our python code.
+    # REMOVED: The health_checks section was here.
+    # It is not needed for a worker that polls an external service.
 
     # This tells the service to use the environment variables 
     # you set in the Koyeb dashboard.
