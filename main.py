@@ -6,7 +6,7 @@
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
 #           Userbot Forwarder Management Bot
-#          (Definitive Version v3.2 - Final)
+#          (Definitive Version v3.4 - Final)
 
 import os
 import asyncio
@@ -72,6 +72,14 @@ def clean_session_string(session_string: str) -> str:
     """Thoroughly cleans the session string."""
     return re.sub(r'[\s\x00-\x1f\x7f-\x9f]', '', session_string)
 
+def generate_device_name():
+    """Generates a realistic device name from a predefined list."""
+    device_names = [
+        "MSI B550", "Asus ROG Strix Z690E", "Gigabyte Aorus Master",
+        "XPS Desktop", "Hp Pavilion Plus", "Lenovo Legion Tower", "Aurora R13"
+    ]
+    return random.choice(device_names)
+
 # --- Decorator for Owner-Only Access ---
 def owner_only(func):
     @wraps(func)
@@ -92,7 +100,7 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
         client = PyrogramClient(
             name=f"userbot_{random.randint(1000, 9999)}",
             api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True,
-            device_model="Hexagram", system_version="1.7.3", app_version="1.7.3", lang_code="en"
+            device_model=generate_device_name(), system_version="1.7.3", app_version="1.7.3", lang_code="en"
         )
     except Exception as e:
         logger.error(f"Error initializing PyrogramClient: {e}")
@@ -344,7 +352,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     client = PyrogramClient(
         name=f"userbot_{random.randint(1000, 9999)}", api_id=API_ID, api_hash=API_HASH, in_memory=True,
-        device_model="Hexagram", system_version="1.7.3", app_version="1.7.3", lang_code="en"
+        device_model=generate_device_name(), system_version="1.7.3", app_version="1.7.3", lang_code="en"
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
@@ -500,10 +508,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --- Main Runner ---
-async def post_init(application: Application):
-    await start_all_userbots_from_db(application)
-
-def main():
+async def main():
+    """Initializes and runs the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     
     gen_conv = ConversationHandler(
@@ -518,6 +524,7 @@ def main():
         conversation_timeout=300
     )
 
+    # Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
@@ -542,10 +549,14 @@ def main():
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern="^delete_account_"))
     application.add_handler(CallbackQueryHandler(generate_command, pattern="^call_generate$"))
     
+    # Text Handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
+    # Initialize userbots before polling
+    await start_all_userbots_from_db(application)
+
     logger.info("Bot is starting...")
-    application.run_polling(post_init=post_init)
+    await application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
