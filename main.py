@@ -322,7 +322,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (
             f"<b>Name:</b> {name_display}\n"
             f"<b>Username:</b> @{username_escaped if username_escaped else 'N/A'}\n"
-            f"<b>Phone:</b> <code>{phone_escaped}</code>\n"
+            f"<b>Phone:</b> <code>+{phone_escaped}</code>\n"
             f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>\n{'-'*25}\n"
         )
         
@@ -492,14 +492,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
     bot_username = context.application.bot.username
     
-    status_text = (f"📊 <b>Bot Status</b>\n"
-                   f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"<b>Management Bot:</b> Online\n"
-                   f"<b>OTP Source:</b> <code>777000</code>\n"
-                   f"<b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n\n"
+    status_text = (f"<b>Bot Status</b>\n"
                    f"<b>Accounts Running:</b> {running_bots}/{total_bots}\n"
                    f"<b>Paused OTP Destroying:</b> {len(paused_forwarding)} bots\n"
-                   f"<b>Paused OtpForwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
+                   f"<b>Paused OTP Forwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
 # --- NEW NON-BLOCKING PAUSE COMMANDS ---
@@ -532,7 +528,7 @@ async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses a single userbot's OTP processing using the job queue."""
+    """Pauses a single account's OTP Destruction."""
     try:
         user_id_to_pause = int(context.args[0])
         if user_id_to_pause not in active_userbots:
@@ -579,13 +575,13 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
     context.bot_data[pause_id] = True # True means notifications ARE now paused
     
     await query.edit_message_text(
-        f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
+        f"{query.message.text}\n\n<i>✅ Forwarding also paused for the remainder of the 5-minute window.</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=None
     )
 
 async def resume_all_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job callback to resume all OTP processing and notifications."""
+    """Resume all OTP Destruction and forwarding."""
     paused_forwarding.clear()
     paused_notifications.discard(OWNER_ID)
     logger.info("Resumed all OTP processing and notifications.")
@@ -593,11 +589,11 @@ async def resume_all_job(context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses all userbots' OTP processing and notifications using the job queue."""
+    """Pauses all accounts' OTP Destruction and Forwarding."""
     for user_id in active_userbots.keys():
         paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
-    await update.message.reply_text("✅ Paused all OTP processing and notifications for 5 minutes.")
+    await update.message.reply_text("✅ Paused all OTP destroying and forwarding for 5 minutes.")
     
     context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
 
