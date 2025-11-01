@@ -1,5 +1,5 @@
 python-telegram-bot[job-queue]
-pyrogram
+pyroblack
 tgcrypto
 pymongo[srv]
 python-dotenv

@@ -248,7 +248,7 @@ async def get_source_chat():
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_html(
-        "👋 Welcome! I am your userbot security manager.\n\n"
+        "I am your personal account manager.\n\n"
         "Use /settings to configure, /add to add accounts, and /remove to delete them."
     )
 
@@ -264,13 +264,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.application.bot.username
     
     message_text = (
-        "⚙️  <b>Settings Dashboard</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Here you can manage your userbot accounts.\n\n"
-        "▶️  <b>OTP Source:</b> <code>777000</code> (Telegram)\n"
-        "      <i>Messages from this chat will be processed.</i>\n\n"
-        f"🎯  <b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n"
-        "      <i>Messages will be copied here.</i>"
+        "<b>Accounts Dashboard</b>\n"
     )
 
     if update.callback_query:
@@ -500,9 +494,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"<b>Management Bot:</b> Online\n"
                    f"<b>OTP Source:</b> <code>777000</code>\n"
                    f"<b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n\n"
-                   f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n"
-                   f"<b>Paused OTP Processing:</b> {len(paused_forwarding)} bots\n"
-                   f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
+                   f"<b>Accounts Running:</b> {running_bots}/{total_bots}\n"
+                   f"<b>Paused OTP Destroying:</b> {len(paused_forwarding)} bots\n"
+                   f"<b>Paused OtpForwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
 # --- NEW NON-BLOCKING PAUSE COMMANDS ---
