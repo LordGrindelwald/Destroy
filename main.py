@@ -306,15 +306,18 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username_escaped = escape_html(acc.get('username'))
         phone_escaped = escape_html(acc.get('phone_number', 'N/A'))
         
-        user_id = acc.get('user_id') # Get user_id, default is None
+        user_id = acc.get('user_id') # Get user_id
 
-        name_display = ""
-        if user_id and isinstance(user_id, int):
-            # Create a clickable mention if user_id is a valid integer
-            name_display = f"<a href=\"tg://user?id={user_id}\">{first_name_escaped}</a>"
-        else:
-            # Fallback to plain text if user_id is missing or invalid
+        # --- MODIFIED LOGIC ---
+        # We will try to create a mention. If casting user_id to int fails,
+        # we'll fall back to plain text.
+        try:
+            # Create a clickable mention
+            name_display = f"<a href=\"tg://user?id={int(user_id)}\">{first_name_escaped}</a>"
+        except (ValueError, TypeError, SystemError):
+            # Fallback to plain text if user_id is None or not a valid integer
             name_display = first_name_escaped
+        # --- END MODIFIED LOGIC ---
         
         text += (
             f"<b>Name:</b> {name_display}\n"
