@@ -150,7 +150,7 @@ async def start_userbot(
                 await client.leave_chat(bot_username, delete=True)
                 logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                 account_info["is_acquainted"] = True
-            except Exception as e:
+           except Exception as e:
                 logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
                 account_info["is_acquainted"] = False # Will try again on next start
         else:
