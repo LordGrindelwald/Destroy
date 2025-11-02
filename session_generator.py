@@ -60,15 +60,18 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
         in_memory=True,
-        # MODIFIED: Limiting workers and disabling updates for stable login
+        # FINAL STABILITY FIXES:
         workers=1,
         no_updates=True,
+        # Force simple, non-auto-managed connection for stability
+        test_mode=True, 
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
         lang_code=TD_LANG_CODE,
         system_lang_code=TD_SYSTEM_LANG_CODE,
         lang_pack=TD_LANG_PACK
+        # Removed: timeout, sleep_threshold, connection_timeout, proxy
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
@@ -129,7 +132,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    password, client = context.user_data['temp_client']
+    password, client = update.message.text, context.user_data['temp_client']
     unique_name = context.user_data.get('unique_name')
     
     msg = await update.message.reply_text("⏳ Checking password...")
