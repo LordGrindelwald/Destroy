@@ -295,6 +295,74 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action cancelled.")
 
 # --- CallbackQuery Handlers ---
+@owner_only
+async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /accs command. Shows list of accounts with no buttons."""
+    if accounts_collection is None:
+        await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
+        return
+        
+    accounts = list(accounts_collection.find())
+    
+    base_text = "👤 <b>Your Managed Accounts:</b>\n\n"
+    text_parts = []
+
+    if not accounts:
+        base_text += "No accounts have been added yet."
+        await update.message.reply_html(base_text)
+        return
+    
+    for acc in accounts:
+        user_id = acc.get('user_id')
+        
+        # Get raw values first
+        raw_first_name = acc.get('first_name')
+        raw_unique_name = acc.get('unique_name')
+        raw_username = acc.get('username')
+        raw_phone = acc.get('phone_number') # Get None if missing
+
+        # Escape only if they exist
+        first_name = escape_html(raw_first_name) if raw_first_name else None
+        unique_name = escape_html(raw_unique_name) if raw_unique_name else None
+        username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
+        phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
+
+        # --- Corrected Universal Mention Logic ---
+        link_text = ""
+        if first_name:
+            link_text = first_name
+        elif unique_name:
+            link_text = unique_name
+        elif user_id:
+            link_text = str(user_id) # Fallback to user_id as text
+        else:
+            link_text = "Unknown (Refresh required)" # Ultimate fallback
+
+        # Combine if both exist
+        if first_name and unique_name:
+            link_text = f"{first_name} ({unique_name})"
+
+        name_display = ""
+        if user_id:
+            # This is the universal mention. It's built correctly now.
+            name_display = f"<a href=\"tg://user?id={user_id}\">{link_text}</a>"
+        else:
+            # Fallback if user_id is missing from the database
+            name_display = f"{link_text} (<i>ID missing, run /refresh</i>)"
+        # --- End of Corrected Logic ---
+
+        entry_text = (
+            f"{name_display}\n"
+            f"<b>User:</b> {username_str}\n"
+            f"<b>Phone:</b> <code>{phone_str}</code>\n"
+            f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
+        )
+        text_parts.append(entry_text)
+
+    final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
+    
+    # Send as one message, but disable preview
+    await update.message.reply_html(final_text, disable_web_page_preview=True)
 
 @owner_only
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,28 +380,49 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not accounts:
         base_text += "No accounts have been added yet.\n\n"
-        base_text += "ℹ️ <i>Run /refresh to update details and fix missing mentions.</i>"
+        base_text += "ℹ️ <i>Run /refresh to update details.</i>"
     else:
         for acc in accounts:
-            first_name = escape_html(acc.get('first_name', 'N/A'))
-            username_str = f"@{escape_html(acc.get('username'))}" if acc.get('username') else 'N/A'
-            phone_str = escape_html(acc.get('phone_number', 'N/A'))
             user_id = acc.get('user_id')
-            unique_name = escape_html(acc.get('unique_name'))
+            
+            # Get raw values first
+            raw_first_name = acc.get('first_name')
+            raw_unique_name = acc.get('unique_name')
+            raw_username = acc.get('username')
+            raw_phone = acc.get('phone_number') # Get None if missing
+
+            # Escape only if they exist
+            first_name = escape_html(raw_first_name) if raw_first_name else None
+            unique_name = escape_html(raw_unique_name) if raw_unique_name else None
+            username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
+            phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
+
+            # --- Corrected Universal Mention Logic ---
+            link_text = ""
+            if first_name:
+                link_text = first_name
+            elif unique_name:
+                link_text = unique_name
+            elif user_id:
+                link_text = str(user_id) # Fallback to user_id as text
+            else:
+                link_text = "Unknown (Refresh required)" # Ultimate fallback
+
+            # Combine if both exist
+            if first_name and unique_name:
+                link_text = f"{first_name} ({unique_name})"
 
             name_display = ""
             if user_id:
-                name_display = f"<a href=\"tg://user?id={user_id}\">{first_name}</a>"
+                name_display = f"<a href=\"tg://user?id={user_id}\">{link_text}</a>"
             else:
-                name_display = f"{first_name} (<i>No mention</i>)"
-            
-            if unique_name:
-                name_display += f" (<code>{unique_name}</code>)"
+                name_display = f"{link_text} (<i>ID missing, run /refresh</i>)"
+            # --- End of Corrected Logic ---
 
             entry_text = (
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
-                f"<b>Phone:</b> <code>+{phone_str}</code>\n"
+                f"<b>Phone:</b> <code>{phone_str}</code>\n"
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)

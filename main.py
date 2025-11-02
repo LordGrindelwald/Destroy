@@ -23,7 +23,7 @@ from bot_handlers import (
     refresh_command, cancel_command, set_unique_name_command,
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
-    paste_single_conv # Import paste flow
+    paste_single_conv, accounts_command # Import paste flow
 )
 
 # --- MODIFIED: New dummy function for silent command ---
@@ -55,6 +55,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("temp_fwd", temp_pause_all))
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
+    application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
