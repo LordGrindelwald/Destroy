@@ -60,6 +60,8 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
         in_memory=True,
+        # MODIFIED: Limiting workers for stability
+        workers=1,
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,

@@ -63,7 +63,7 @@ def main() -> None:
         .post_shutdown(post_shutdown_tasks) \
         .build()
 
-    # --- Register Handlers (all handlers remain the same) ---
+    # --- Register Handlers ---
     
     # 1. Conversation Handlers
     application.add_handler(gen_conv, group=0)
@@ -98,14 +98,10 @@ def main() -> None:
     # --- MODIFIED: Start the bot blocking (synchronously) ---
     logger.info("Bot is starting...")
     
-    try:
-        # run_polling() is the final, synchronous, blocking call 
-        # that handles the event loop correctly.
-        application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
+    # run_polling() is the final, synchronous, blocking call 
+    # that handles the event loop correctly.
+    application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
         
-    except Exception as e:
-        logger.critical(f"Bot failed during polling: {e}")
-
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
@@ -118,3 +114,6 @@ if __name__ == "__main__":
             main()
         except KeyboardInterrupt:
             logger.info("Bot stopped manually.")
+        except SystemExit:
+            # Catch SystemExit for clean deployment environment shutdown
+            logger.info("SystemExit received. Exiting gracefully.")
