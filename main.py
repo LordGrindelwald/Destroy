@@ -8,12 +8,10 @@ from telegram.ext import (
 )
 
 # Import from our own modules
-# --- MODIFIED ---
 from config import (
     BOT_TOKEN, logger, MONGO_URI, 
     OWNER_ID, API_ID, API_HASH
 )
-# --- END MODIFIED ---
 from userbot_logic import start_all_userbots_from_db
 from session_generator import gen_conv # Import generate flow
 from bot_handlers import (
@@ -74,7 +72,6 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == "__main__":
-    # The variables are now imported and accessible
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
     elif not all([MONGO_URI, OWNER_ID, API_ID, API_HASH]):
