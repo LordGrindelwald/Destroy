@@ -1,3 +1,4 @@
+import asyncio
 from functools import partial
 from telegram import Update
 from telegram.ext import (
@@ -12,7 +13,7 @@ from telegram.ext import (
 # Import from our own modules
 from config import (
     BOT_TOKEN, logger, MONGO_URI, 
-    OWNER_ID
+    OWNER_ID, active_userbots
 )
 from userbot_logic import start_all_userbots_from_db
 from session_generator import gen_conv # Import generate flow
@@ -30,19 +31,12 @@ async def do_nothing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Does absolutely nothing."""
     return
 
-def main() -> None:
-    """Configures and runs the bot."""
+# --- MODIFIED: Main function is now async ---
+async def main() -> None:
+    """Configures and runs the bot non-blockingly."""
     
     # --- Application Setup ---
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    async def post_init_task(app: Application):
-        """Task to run after bot is initialized but before polling."""
-        await app.bot.get_me()
-        logger.info(f"Management bot @{app.bot.username} started.")
-        await start_all_userbots_from_db(app)
-
-    application.post_init = post_init_task
 
     # --- Register Handlers ---
     
@@ -62,7 +56,6 @@ def main() -> None:
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
-    # --- MODIFIED: Add silent handler for acquaintance ---
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers
@@ -76,9 +69,43 @@ def main() -> None:
     # 4. Message Handler (must be low priority)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
-    # --- Start Bot ---
-    logger.info("Bot is starting polling...")
-    application.run_polling()
+    # --- MODIFIED: Start the bot non-blockingly ---
+    logger.info("Bot is starting...")
+    
+    # Run the post_init_task manually *before* starting the poller
+    try:
+        await application.initialize()
+        await application.bot.get_me()
+        logger.info(f"Management bot @{application.bot.username} started.")
+        
+        # Start userbots
+        await start_all_userbots_from_db(application)
+        
+        # Start polling in the background
+        await application.start()
+        await application.updater.start_polling()
+        
+        logger.info("Bot is now running. Press Ctrl-C to stop.")
+        
+        # Keep the script alive
+        while True:
+            await asyncio.sleep(3600)
+            
+    except Exception as e:
+        logger.critical(f"Bot failed to start: {e}")
+    finally:
+        logger.info("Shutting down userbots...")
+        for client in active_userbots.values():
+            if client.is_connected:
+                await client.stop()
+        
+        logger.info("Stopping bot...")
+        if application.updater.is_running:
+            await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        logger.info("Shutdown complete.")
+
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
@@ -86,4 +113,8 @@ if __name__ == "__main__":
     elif not all([MONGO_URI, OWNER_ID]):
         logger.critical("One or more environment variables (MONGO_URI, OWNER_ID) are missing.")
     else:
-        main()
+        # --- MODIFIED: Use asyncio.run to start the async main function ---
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            logger.info("Bot stopped manually.")
