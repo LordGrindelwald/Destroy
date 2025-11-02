@@ -95,17 +95,16 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             in_memory=True,
-            # FINAL STABILITY FIXES:
+            # FINAL STABILITY FIX: Disable background noise
             workers=1,
-            # Force simple, non-auto-managed connection for stability
-            test_mode=True, 
+            no_updates=True, 
+            # Removed: timeout, sleep_threshold, connection_timeout, proxy, test_mode
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
             lang_code=TD_LANG_CODE,
             system_lang_code=TD_SYSTEM_LANG_CODE,
             lang_pack=TD_LANG_PACK
-            # Removed: timeout, sleep_threshold, connection_timeout, proxy
         )
     except Exception as e:
         logger.error(f"Error initializing PyrogramClient for session ending ...{session_string[-4:]}: {e}")
@@ -122,6 +121,7 @@ async def start_userbot(
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         
         source_chat_id = await get_source_chat()
+        # This explicitly tells Pyrogram to handle messages despite no_updates=True
         client.add_handler(MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service

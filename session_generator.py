@@ -60,18 +60,16 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
         in_memory=True,
-        # FINAL STABILITY FIXES:
+        # FINAL STABILITY FIX: Disable background noise
         workers=1,
         no_updates=True,
-        # Force simple, non-auto-managed connection for stability
-        test_mode=True, 
+        # Removed: timeout, sleep_threshold, connection_timeout, proxy, test_mode
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
         lang_code=TD_LANG_CODE,
         system_lang_code=TD_SYSTEM_LANG_CODE,
         lang_pack=TD_LANG_PACK
-        # Removed: timeout, sleep_threshold, connection_timeout, proxy
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
