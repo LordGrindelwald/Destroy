@@ -8,7 +8,6 @@ from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
     AuthKeyDuplicated
 )
-from pyrogram.transport import Transport
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 from telegram.constants import ParseMode
@@ -102,7 +101,6 @@ async def start_userbot(
             lang_code=TD_LANG_CODE,
             system_lang_code=TD_SYSTEM_LANG_CODE,
             lang_pack=TD_LANG_PACK,
-            transport=Transport.TCP_ABRIDGED,
             connection_retries=10,
             retry_delay=5
         )
