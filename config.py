@@ -12,21 +12,25 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID"))
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+
+# --- MODIFIED: Hardcoded Telegram Desktop Values with exact names ---
+TD_API_ID = 2040
+TD_API_HASH = "b18441a1ff607e10a989891a5462e627"
+TD_SYSTEM_VERSION = "Windows 11"
+TD_APP_VERSION = "5.2.2 x64"
+TD_LANG_CODE = "en"
+TD_SYSTEM_LANG_CODE = "en-US"
+TD_LANG_PACK = "tdesktop"
 
 # --- Database & In-Memory State ---
 try:
-    # MODIFIED: Added connectTimeoutMS and socketTimeoutMS
-    # This forces all operations (not just the first) to time out after 5 seconds
-    # instead of hanging indefinitely.
+    # Set timeouts to prevent hangs on dead connections
     client = MongoClient(
         MONGO_URI, 
         serverSelectionTimeoutMS=5000, 
         connectTimeoutMS=5000, 
         socketTimeoutMS=5000
     )
-    
     # Force a connection check to catch errors *now*
     client.server_info() 
     

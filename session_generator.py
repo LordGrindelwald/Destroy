@@ -1,7 +1,7 @@
 import asyncio
 import random
-from pyrogram import Client as PyrogramClient
-from pyrogram.errors import SessionPasswordNeeded
+from pyroblack import Client
+from pyroblack.errors import SessionPasswordNeeded
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     CommandHandler,
@@ -14,9 +14,13 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # Import from our own modules
+# --- MODIFIED: Import all TD_ prefixed config values ---
 from config import (
-    API_ID, API_HASH, accounts_collection, logger, 
-    UNIQUE_NAME_GEN, PHONE, CODE, PASSWORD
+    accounts_collection, logger, 
+    UNIQUE_NAME_GEN, PHONE, CODE, PASSWORD,
+    TD_API_ID, TD_API_HASH, TD_SYSTEM_VERSION, 
+    TD_APP_VERSION, TD_LANG_CODE, 
+    TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
 from utils import owner_only, generate_device_name, escape_html
 from userbot_logic import start_userbot # To add the account after generation
@@ -50,9 +54,19 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
-    client = PyrogramClient(
-        name=f"userbot_{random.randint(1000, 9999)}", api_id=API_ID, api_hash=API_HASH, in_memory=True,
-        device_model=generate_device_name(), system_version="Telegram Desktop 4.8.3", app_version="4.8.3", lang_code="en"
+    
+    # --- MODIFIED: Use all TD_ prefixed device values ---
+    client = Client(
+        name=f"userbot_{random.randint(1000, 9999)}",
+        api_id=TD_API_ID,
+        api_hash=TD_API_HASH,
+        in_memory=True,
+        device_model=generate_device_name(), # Use random device name
+        system_version=TD_SYSTEM_VERSION,
+        app_version=TD_APP_VERSION,
+        lang_code=TD_LANG_CODE,
+        system_lang_code=TD_SYSTEM_LANG_CODE,
+        lang_pack=TD_LANG_PACK
     )
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)

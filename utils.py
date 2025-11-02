@@ -38,13 +38,13 @@ def owner_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# --- NEW Helper Function ---
+# --- Helper Function (with the correct bug fix) ---
 async def get_account_from_arg(arg: str):
     """
     Finds an account by its user_id or unique_name.
     Returns the full account document from MongoDB.
     """
-    # --- MODIFIED: Correct DB connection check ---
+    # --- MODIFIED: This is the correct check ---
     if accounts_collection is None:
         return None
         
