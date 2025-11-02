@@ -63,7 +63,8 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # REMOVED: in_memory=True
         workers=1,
         no_updates=True,
-        # All other stability flags removed
+        # FINAL STABILITY FIX: Aggressively suppress FloodWait logic
+        sleep_threshold=9999,
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,

@@ -90,16 +90,16 @@ async def start_userbot(
     me = None
     try:
         # MODIFIED: Use a unique name for persistent session storage
-        # This will be either the unique_name or the last 8 chars of the session string if no name is available
         session_prefix = unique_name if unique_name else session_string[-8:]
         client = Client(
             name=f"session_{session_prefix}", 
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
             session_string=session_string,
-            # REMOVED: in_memory=True to enable file persistence (stable session loading)
+            # REMOVED: in_memory=True to enable file persistence
             workers=1,
-            # All other stability flags removed
+            # FINAL STABILITY FIX: Aggressively suppress FloodWait logic
+            sleep_threshold=9999,
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
