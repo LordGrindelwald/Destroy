@@ -95,8 +95,9 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             in_memory=True,
-            # MODIFIED: Limiting workers for stability
+            # MODIFIED: Limiting workers and disabling updates for maximum stability
             workers=1,
+            no_updates=True,
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
