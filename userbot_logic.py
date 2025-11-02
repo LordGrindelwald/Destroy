@@ -96,7 +96,7 @@ async def start_userbot(
             session_string=session_string,
             in_memory=True,
             # MODIFIED: Limiting workers for stability
-            workers=1, 
+            workers=1,
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
