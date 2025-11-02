@@ -7,10 +7,12 @@ WORKDIR /app
 # Copy the requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Install the Python dependencies
+# Install the Python dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- MODIFIED ---
+# --- MODIFIED: Explicitly install/upgrade pyroblack as requested ---
+RUN pip install -U pyroblack
+
 # Copy ALL files (main.py, config.py, utils.py, etc.)
 # from the current directory into the container's /app directory.
 COPY . .
