@@ -8,6 +8,7 @@ from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
     AuthKeyDuplicated
 )
+from pyrogram.transport import Transport
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 from telegram.constants import ParseMode
@@ -100,7 +101,10 @@ async def start_userbot(
             app_version=TD_APP_VERSION,
             lang_code=TD_LANG_CODE,
             system_lang_code=TD_SYSTEM_LANG_CODE,
-            lang_pack=TD_LANG_PACK
+            lang_pack=TD_LANG_PACK,
+            transport=Transport.TCP_ABRIDGED,
+            connection_retries=10,
+            retry_delay=5
         )
     except Exception as e:
         logger.error(f"Error initializing PyrogramClient for session ending ...{session_string[-4:]}: {e}")
