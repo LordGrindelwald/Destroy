@@ -82,16 +82,11 @@ async def main() -> None:
         # Start userbots
         await start_all_userbots_from_db(application)
         
-        # Start polling in the background
-        await application.start()
-        await application.updater.start_polling()
-        
         logger.info("Bot is now running. Press Ctrl-C to stop.")
         
-        # Keep the script alive
-        while True:
-            await asyncio.sleep(3600)
-            
+        # MODIFIED: Use run_polling for robust polling and loop control
+        await application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
+        
     except Exception as e:
         logger.critical(f"Bot failed to start: {e}")
     finally:
@@ -101,8 +96,9 @@ async def main() -> None:
                 await client.stop()
         
         logger.info("Stopping bot...")
-        if application.updater.is_running:
-            await application.updater.stop()
+        # Since we use run_polling, we don't need updater stop/start/shutdown logic 
+        # unless a graceful shutdown signal is caught, but leaving the general 
+        # structure ensures cleanup if the loop is broken.
         await application.stop()
         await application.shutdown()
         logger.info("Shutdown complete.")
