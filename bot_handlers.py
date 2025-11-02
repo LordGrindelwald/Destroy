@@ -412,34 +412,40 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
 # --- Message Handler ---
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
+    """
+    Handles text input for flows that use context.user_data['next_step'].
+    This is intentionally in group 1 (lower priority) so that
+    ConversationHandlers (group 0) can process text first.
+    """
+    if update.effective_user.id != OWNER_ID:
+        return
+        
     step = context.user_data.get('next_step')
-    if not step: return
 
-    if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')): return
-    if step in ['awaiting_single_account', 'awaiting_multiple_accounts']:
-        pass 
-    else:
-        return 
+    # This handler is ONLY for 'awaiting_multiple_accounts'
+    # If the step isn't this, we return immediately and let other
+    # handlers (or nothing) process the message.
+    if step != 'awaiting_multiple_accounts':
+        return
 
+    # Clear the step now that we're handling it
     del context.user_data['next_step']
     
-    if step == 'awaiting_multiple_accounts':
-        text = update.message.text
-        session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
-        msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
-        
-        if accounts_collection is None:
-            await msg.edit_text("⚠️ Database connection is not available. Cannot add accounts.")
-            return
+    text = update.message.text
+    session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
+    msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
+    
+    if accounts_collection is None:
+        await msg.edit_text("⚠️ Database connection is not available. Cannot add accounts.")
+        return
 
-        success, fail = 0, 0
-        for session in session_strings:
-            status, _, detail = await start_userbot(session, context.application, update_info=True)
-            if status == "success": success += 1
-            else: fail += 1
-        await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
-        await asyncio.sleep(3); await settings_command(update, context)
+    success, fail = 0, 0
+    for session in session_strings:
+        status, _, detail = await start_userbot(session, context.application, update_info=True)
+        if status == "success": success += 1
+        else: fail += 1
+    await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
+    await asyncio.sleep(3); await settings_command(update, context)
 
 # --- NEW Paste Single String Conversation Handler ---
 
