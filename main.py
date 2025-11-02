@@ -8,9 +8,10 @@ from telegram.ext import (
 )
 
 # Import from our own modules
+# --- MODIFIED: Removed API_ID and API_HASH from import ---
 from config import (
     BOT_TOKEN, logger, MONGO_URI, 
-    OWNER_ID, API_ID, API_HASH
+    OWNER_ID
 )
 from userbot_logic import start_all_userbots_from_db
 from session_generator import gen_conv # Import generate flow
@@ -60,7 +61,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
-    application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
+    application.add_handler(CallbackQueryCallbackHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
     
@@ -74,7 +75,8 @@ def main() -> None:
 if __name__ == "__main__":
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
-    elif not all([MONGO_URI, OWNER_ID, API_ID, API_HASH]):
-        logger.critical("One or more environment variables (MONGO_URI, OWNER_ID, API_ID, API_HASH) are missing.")
+    # --- MODIFIED: Removed API_ID and API_HASH from this check ---
+    elif not all([MONGO_URI, OWNER_ID]):
+        logger.critical("One or more environment variables (MONGO_URI, OWNER_ID) are missing.")
     else:
         main()
