@@ -11,9 +11,6 @@ services:
     # The command to start your application.
     run_command: python main.py
 
-    # REMOVED: The health_checks section was here.
-    # It is not needed for a worker that polls an external service.
-
     # This tells the service to use the environment variables 
     # you set in the Koyeb dashboard.
     env:
@@ -26,9 +23,5 @@ services:
       - key: OWNER_ID
         scope: secret
         value: owner-id
-      - key: API_ID
-        scope: secret
-        value: api-id
-      - key: API_HASH
-        scope: secret
-        value: api-hash
+      # --- REMOVED API_ID and API_HASH ---
+      # They are now hardcoded in config.py
