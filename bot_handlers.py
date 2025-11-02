@@ -29,8 +29,8 @@ from session_generator import cancel_command_conv # Re-use cancel logic
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_html(
-        "👋 Welcome! I am your userbot security manager.\n\n"
-        "Use /settings to configure, /add to add accounts, and /remove to delete them."
+        "👋 Welcome! I am your personal account manager.\n\n"
+        "Use /settings to configure, /add to add, and /remove to delete accounts."
     )
 
 @owner_only
@@ -45,13 +45,8 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.application.bot.username
     
     message_text = (
-        "⚙️  <b>Settings Dashboard</b>\n"
+        "<b>Accounts Dashboard</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Here you can manage your userbot accounts.\n\n"
-        "▶️  <b>OTP Source:</b> <code>777000</code> (Telegram)\n"
-        "      <i>Messages from this chat will be processed.</i>\n\n"
-        f"🎯  <b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n"
-        "      <i>Messages will be copied here.</i>"
     )
 
     if update.callback_query:
@@ -172,7 +167,7 @@ async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_
     )
     
     await update.message.reply_text(
-        f"✅ Unique name for <b>{escape_html(account.get('first_name'))}</b> "
+        f"✔️ name id for <b>{escape_html(account.get('first_name'))}</b> "
         f"(<code>{account['user_id']}</code>) has been set to <code>{escape_html(new_name)}</code>.",
         parse_mode=ParseMode.HTML
     )
@@ -186,19 +181,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running_bots = len(active_userbots)
     bot_username = context.application.bot.username
     
-    status_text = (f"📊 <b>Bot Status</b>\n"
+    status_text = (f"<b>Bot Status</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"<b>Management Bot:</b> Online\n"
-                   f"<b>OTP Source:</b> <code>777000</code>\n"
-                   f"<b>OTP Target:</b> <code>@{bot_username}</code> (Bot PM)\n\n"
-                   f"<b>Userbots Running:</b> {running_bots}/{total_bots}\n"
-                   f"<b>Paused OTP Processing:</b> {len(paused_forwarding)} bots\n"
-                   f"<b>Paused Notifications:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
+                   f"<b>Accounts Active:</b> {running_bots}/{total_bots}\n"
+                   f"<b>Paused OTP Destruction:</b> {len(paused_forwarding)} bots\n"
+                   f"<b>Paused OTP Forwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses a single userbot's OTP processing using the job queue."""
+    """Pauses a single account's OTP Destruction."""
     if not context.args:
         await update.message.reply_text("Usage: /temp <user_id_or_name>")
         return
@@ -226,7 +218,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         paused_forwarding.add(user_id_to_pause)
         
         keyboard = [[InlineKeyboardButton("Pause Notifications", callback_data=f"pause_notify_{pause_id}")]]
-        message = await update.message.reply_text(f"✅ Paused OTP processing for <code>{escape_html(account.get('first_name'))}</code> (<code>{user_id_to_pause}</code>) for 5 minutes.",
+        message = await update.message.reply_text(f"✅ Paused OTP destruction for <code>{escape_html(account.get('first_name'))}</code> (<code>{user_id_to_pause}</code>) for 5 minutes.",
                                                   reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
         
         context.application.job_queue.run_once(
@@ -241,11 +233,11 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses all userbots' OTP processing and notifications using the job queue."""
+    """Pauses all userbots' OTP Destruction and forwarding."""
     for user_id in active_userbots.keys():
         paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
-    await update.message.reply_text("✅ Paused all OTP processing and notifications for 5 minutes.")
+    await update.message.reply_text("✅ Paused all OTP Destruction and forwarding for 5 minutes.")
     
     context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
 
@@ -259,7 +251,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Stopping all userbots...")
+    msg = await update.message.reply_text("🔄 Stopping all accounts...")
     for uid, client in list(active_userbots.items()):
         if client.is_connected:
             await client.stop()
@@ -339,9 +331,9 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name_display += f" (<code>{unique_name}</code>)"
 
             entry_text = (
-                f"<b>Name:</b> {name_display}\n"
-                f"<b>Username:</b> {username_str}\n"
-                f"<b>Phone:</b> <code>{phone_str}</code>\n"
+                f"{name_display}\n"
+                f"{username_str}\n"
+                f"<code>+{phone_str}</code>\n"
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
