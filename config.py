@@ -24,7 +24,6 @@ try:
     logger.info("Successfully connected to MongoDB.")
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
-    # You might want to exit or handle this more gracefully
     client = None
     db = None
     config_collection = None
@@ -35,4 +34,8 @@ paused_forwarding = set() # This set now controls OTP processing
 paused_notifications = set()
 
 # --- State definitions for ConversationHandler ---
-PHONE, CODE, PASSWORD, ADD_ACCOUNT = range(4)
+# Session Generator
+UNIQUE_NAME_GEN, PHONE, CODE, PASSWORD = range(4)
+
+# Paste String
+UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE = range(4, 6)

@@ -4,8 +4,8 @@ from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
 
-# Import OWNER_ID from config
-from config import OWNER_ID
+# Import OWNER_ID and accounts_collection from config
+from config import OWNER_ID, accounts_collection
 
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
@@ -37,3 +37,27 @@ def owner_only(func):
             return
         return await func(update, context, *args, **kwargs)
     return wrapped
+
+# --- NEW Helper Function ---
+async def get_account_from_arg(arg: str):
+    """
+    Finds an account by its user_id or unique_name.
+    Returns the full account document from MongoDB.
+    """
+    if not accounts_collection:
+        return None
+        
+    account = None
+    try:
+        # Try to find by user_id first
+        user_id = int(arg)
+        account = accounts_collection.find_one({"user_id": user_id})
+    except ValueError:
+        # If not an int, it must be a unique_name
+        pass
+    
+    if account is None:
+        # Try finding by unique_name
+        account = accounts_collection.find_one({"unique_name": arg})
+        
+    return account
