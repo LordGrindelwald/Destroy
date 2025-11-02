@@ -295,6 +295,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action cancelled.")
 
 # --- CallbackQuery Handlers ---
+# In lordgrindelwald/destroy/Destroy-split/bot_handlers.py
+
 @owner_only
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /accs command. Shows list of accounts with no buttons."""
@@ -327,29 +329,33 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
         phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
 
-        # --- Corrected Universal Mention Logic ---
-        link_text = ""
+        # --- MODIFIED MENTION LOGIC ---
+        
+        # 1. Determine the link text. Priority: first_name > user_id > "Unknown"
+        link_text_content = ""
         if first_name:
-            link_text = first_name
-        elif unique_name:
-            link_text = unique_name
+            link_text_content = first_name  # Already escaped
         elif user_id:
-            link_text = str(user_id) # Fallback to user_id as text
+            link_text_content = f"ID: {user_id}" # Fallback
         else:
-            link_text = "Unknown (Refresh required)" # Ultimate fallback
+            link_text_content = "Unknown (Refresh required)" # Ultimate fallback
 
-        # Combine if both exist
-        if first_name and unique_name:
-            link_text = f"{first_name} ({unique_name})"
-
-        name_display = ""
+        # 2. Build the mention link
+        mention_link = ""
         if user_id:
-            # This is the universal mention. It's built correctly now.
-            name_display = f"<a href=\"tg://user?id={user_id}\">{link_text}</a>"
+            # Create the link
+            mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
         else:
-            # Fallback if user_id is missing from the database
-            name_display = f"{link_text} (<i>ID missing, run /refresh</i>)"
-        # --- End of Corrected Logic ---
+            # No user_id, so just use the text
+            mention_link = link_text_content
+
+        # 3. Build the final display string
+        name_display = mention_link
+        if unique_name:
+            # Add the unique_name *after* the link
+            name_display += f" ({unique_name})"
+            
+        # --- END OF MODIFIED LOGIC ---
 
         entry_text = (
             f"{name_display}\n"
@@ -397,27 +403,33 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
             phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
 
-            # --- Corrected Universal Mention Logic ---
-            link_text = ""
+            # --- MODIFIED MENTION LOGIC ---
+        
+            # 1. Determine the link text. Priority: first_name > user_id > "Unknown"
+            link_text_content = ""
             if first_name:
-                link_text = first_name
-            elif unique_name:
-                link_text = unique_name
+                link_text_content = first_name  # Already escaped
             elif user_id:
-                link_text = str(user_id) # Fallback to user_id as text
+                link_text_content = f"ID: {user_id}" # Fallback
             else:
-                link_text = "Unknown (Refresh required)" # Ultimate fallback
+                link_text_content = "Unknown (Refresh required)" # Ultimate fallback
 
-            # Combine if both exist
-            if first_name and unique_name:
-                link_text = f"{first_name} ({unique_name})"
-
-            name_display = ""
+            # 2. Build the mention link
+            mention_link = ""
             if user_id:
-                name_display = f"<a href=\"tg://user?id={user_id}\">{link_text}</a>"
+                # Create the link
+                mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
             else:
-                name_display = f"{link_text} (<i>ID missing, run /refresh</i>)"
-            # --- End of Corrected Logic ---
+                # No user_id, so just use the text
+                mention_link = link_text_content
+
+            # 3. Build the final display string
+            name_display = mention_link
+            if unique_name:
+                # Add the unique_name *after* the link
+                name_display += f" ({unique_name})"
+                
+            # --- END OF MODIFIED LOGIC ---
 
             entry_text = (
                 f"{name_display}\n"
