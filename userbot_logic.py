@@ -23,19 +23,6 @@ from config import (
 )
 from utils import generate_device_name, escape_html
 
-# --- NEW SAFE CLIENT WRAPPER (Workaround for latest pyroblack) ---
-# This class filters out arguments not supported by pyrogram v2/pyroblack latest
-# but keeps them in the function call to prevent the TypeError.
-class SafeClient(Client):
-    """A Client wrapper that safely ignores deprecated v1 arguments."""
-    def __init__(self, *args, **kwargs):
-        # Safely remove the incompatible arguments before calling the new Client.__init__
-        kwargs.pop("connection_retries", None)
-        kwargs.pop("retry_delay", None)
-        super().__init__(*args, **kwargs)
-# ---------------------------------------------
-
-
 async def get_source_chat():
     return 777000 # Hardcoded to Telegram's official account
 
@@ -50,9 +37,6 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         
         try:
             if hasattr(client, "InvalidateSignInCodes"):
-                # Note: This is an RPC method, so we should check for its existence
-                # which is done via getattr in modern libraries, but sticking to
-                # your style, we check via hasattr.
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
             else:
@@ -105,8 +89,7 @@ async def start_userbot(
     """
     me = None
     try:
-        # --- MODIFIED: Using SafeClient to prevent 'unexpected keyword argument' error ---
-        client = SafeClient(
+        client = Client(
             name=":memory:",
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
@@ -118,8 +101,8 @@ async def start_userbot(
             lang_code=TD_LANG_CODE,
             system_lang_code=TD_SYSTEM_LANG_CODE,
             lang_pack=TD_LANG_PACK,
-            connection_retries=10, # Now safely ignored by SafeClient
-            retry_delay=5          # Now safely ignored by SafeClient
+            connection_retries=10,
+            retry_delay=5
         )
     except Exception as e:
         logger.error(f"Error initializing PyrogramClient for session ending ...{session_string[-4:]}: {e}")
