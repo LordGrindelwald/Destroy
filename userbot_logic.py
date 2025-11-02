@@ -3,7 +3,6 @@ import random
 import traceback
 from functools import partial
 
-# --- MODIFIED: Imports are from pyrogram, as per your documentation ---
 from pyrogram import Client, filters
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
@@ -80,7 +79,8 @@ async def start_userbot(
     session_string: str, 
     ptb_app: Application, 
     update_info: bool = False, 
-    unique_name: str = None
+    unique_name: str = None,
+    force_acquaintance: bool = False # --- MODIFIED: New argument ---
 ):
     """
     Starts a userbot. Can optionally pass a unique_name to be saved.
@@ -123,17 +123,42 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        if update_info:
-            account_info = {
-                "user_id": me.id, 
-                "first_name": me.first_name, 
-                "username": me.username,
-                "phone_number": me.phone_number, 
-                "session_string": session_string,
-            }
-            if unique_name:
-                account_info["unique_name"] = unique_name
+        # --- MODIFIED: Acquaintance logic added ---
+        
+        # 1. Prepare account_info dict first
+        account_info = {
+            "user_id": me.id, 
+            "first_name": me.first_name, 
+            "username": me.username,
+            "phone_number": me.phone_number, 
+            "session_string": session_string,
+        }
+        if unique_name:
+            account_info["unique_name"] = unique_name
             
+        # 2. Check if acquaintance message is needed
+        bot_username = ptb_app.bot.username
+        account_doc = None
+        if accounts_collection is not None:
+            account_doc = accounts_collection.find_one({"user_id": me.id})
+            
+        needs_acquaintance = force_acquaintance or not (account_doc and account_doc.get('is_acquainted'))
+        
+        if needs_acquaintance and bot_username:
+            try:
+                # Send a message to the bot to "meet" it
+                await client.send_message(bot_username, "/start acquaintance_check")
+                logger.info(f"Account {me.id} sent acquaintance message to @{bot_username}")
+                account_info["is_acquainted"] = True
+            except Exception as e:
+                logger.warning(f"Could not send acquaintance message from {me.id} to @{bot_username}: {e}")
+                account_info["is_acquainted"] = False # Will try again on next refresh
+        else:
+            # Mark as acquainted if it already was, or if we're not forcing it
+            account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted'))
+
+        # 3. Save to DB if update_info is True
+        if update_info:
             if accounts_collection is not None:
                 accounts_collection.update_one(
                     {"user_id": me.id}, 
@@ -152,7 +177,7 @@ async def start_userbot(
         error_detail = "Your API_ID or API_HASH is invalid. Please check your config."
         return "api_id_invalid", None, error_detail
     except FloodWait as e:
-        error_detail = f"Flood wait of {e.row.value} seconds. Too many login attempts."
+        error_detail = f"Flood wait of {e.value} seconds. Too many login attempts."
         return "flood_wait", None, error_detail
     except Exception as e:
         full_traceback = traceback.format_exc()
@@ -168,7 +193,11 @@ async def start_userbot(
             if not is_active:
                 await client.stop()
 
-async def start_all_userbots_from_db(application: Application, update_info: bool = False):
+async def start_all_userbots_from_db(
+    application: Application, 
+    update_info: bool = False, 
+    force_acquaintance: bool = False # --- MODIFIED: New argument ---
+):
     if accounts_collection is None:
         logger.error("Database not connected. Cannot start userbots from DB.")
         return 0, 0, ["Database connection failed."]
@@ -181,7 +210,13 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
         session_str = account.get("session_string", "")
         if not session_str: continue
         
-        status, _, detail = await start_userbot(session_str, application, update_info=update_info)
+        # --- MODIFIED: Pass force_acquaintance flag ---
+        status, _, detail = await start_userbot(
+            session_str, 
+            application, 
+            update_info=update_info, 
+            force_acquaintance=force_acquaintance
+        )
         if status == "success":
             success_count += 1
         else:

@@ -44,7 +44,6 @@ async def get_account_from_arg(arg: str):
     Finds an account by its user_id or unique_name.
     Returns the full account document from MongoDB.
     """
-    # --- MODIFIED: This is the correct check ---
     if accounts_collection is None:
         return None
         
@@ -58,7 +57,7 @@ async def get_account_from_arg(arg: str):
         pass
     
     if account is None:
-        # Try finding by unique_name
-        account = accounts_collection.find_one({"unique_name": arg})
+        # --- MODIFIED: Search by lowercase unique_name ---
+        account = accounts_collection.find_one({"unique_name": arg.lower()})
         
     return account

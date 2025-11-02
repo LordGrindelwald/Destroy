@@ -1,6 +1,5 @@
 import asyncio
 import random
-# --- MODIFIED: Imports are from pyrogram, as per your documentation ---
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,8 +38,10 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name and asks for phone number."""
-    unique_name = update.message.text.strip().split()[0] # Take first word
+    # --- MODIFIED: Force unique_name to lowercase ---
+    unique_name = update.message.text.strip().split()[0].lower()
     
+    # Check if name is taken (now case-insensitive)
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text("That name is already taken. Please choose another one.")
         return UNIQUE_NAME_GEN # Stay in this state
