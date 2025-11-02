@@ -147,7 +147,7 @@ async def start_userbot(
                 # Send a silent command to the bot
                 await client.send_message(bot_username, "/init_abc")
                 # Immediately delete the chat
-                await client.delete_chat(bot_username)
+                await client.delete_dialog(bot_username)
                 logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                 account_info["is_acquainted"] = True
             except Exception as e:
