@@ -82,6 +82,11 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles /remove command.
+    If args provided, attempts to remove directly.
+    If no args, shows the button menu.
+    """
     if context.args:
         identifier = context.args[0]
         account = await get_account_from_arg(identifier)
@@ -92,11 +97,13 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_id_to_delete = account['user_id']
         
+        # Stop client if running
         if user_id_to_delete in active_userbots:
             logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
             await active_userbots[user_id_to_delete].stop()
             del active_userbots[user_id_to_delete]
             
+        # Delete from DB
         result = accounts_collection.delete_one({"user_id": user_id_to_delete})
         
         if result.deleted_count > 0:
@@ -105,6 +112,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
         
     else:
+        # No args, show menu
         accounts = list(accounts_collection.find())
         if not accounts:
             await update.message.reply_html("There are no accounts to remove.")
@@ -134,16 +142,19 @@ async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_
         
     identifier, new_name = context.args
     
+    # Check if new_name is already taken
     existing_with_name = accounts_collection.find_one({"unique_name": new_name})
     if existing_with_name:
         await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
+    # Find the account to update
     account = await get_account_from_arg(identifier)
     if not account:
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
         
+    # Update the account
     accounts_collection.update_one(
         {"user_id": account["user_id"]},
         {"$set": {"unique_name": new_name}}
@@ -172,6 +183,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses a single userbot's OTP processing using the job queue."""
     if not context.args:
         await update.message.reply_text("Usage: /temp <user_id_or_name>")
         return
@@ -190,7 +202,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
-        context.bot_data[pause_id] = False
+        context.bot_data[pause_id] = False # False means notifications are NOT paused by default
 
         paused_forwarding.add(user_id_to_pause)
         
@@ -200,7 +212,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         context.application.job_queue.run_once(
             callback=resume_forwarding_job,
-            when=300,
+            when=300, # 5 minutes
             data={'user_id': user_id_to_pause, 'pause_id': pause_id, 'message_id': message.message_id},
             name=f"resume_{pause_id}"
         )
@@ -210,6 +222,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses all userbots' OTP processing and notifications using the job queue."""
     for user_id in active_userbots.keys():
         paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
@@ -254,12 +267,13 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """General cancel command, clears user_data but not conv handler."""
     context.user_data.clear()
     await update.message.reply_text("Action cancelled.")
 
 # --- CallbackQuery Handlers ---
 
-# --- MODIFIED: Rewritten for clarity and reliability ---
+# --- MODIFIED: Rewritten for clarity, reliability, and single-message format ---
 @owner_only
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -267,58 +281,51 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accounts = list(accounts_collection.find())
     
     base_text = "👤 <b>Your Managed Accounts:</b>\n\n"
-    
+    text_parts = []
+
     if not accounts:
         base_text += "No accounts have been added yet.\n\n"
         base_text += "ℹ️ <i>Run /refresh if accounts are missing details.</i>"
-        await query.edit_message_text(
-            base_text, 
-            parse_mode=ParseMode.HTML, 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]])
-        )
-        return
+    else:
+        for acc in accounts:
+            first_name = escape_html(acc.get('first_name', 'N/A'))
+            username_str = f"@{escape_html(acc.get('username'))}" if acc.get('username') else 'N/A'
+            phone_str = escape_html(acc.get('phone_number', 'N/A'))
+            user_id = acc.get('user_id')
+            unique_name = escape_html(acc.get('unique_name'))
 
-    # First, edit the original message to show the header
-    await query.edit_message_text(
-        base_text, 
-        parse_mode=ParseMode.HTML
-    )
-
-    # Now, send a separate message for each account
-    for acc in accounts:
-        first_name = escape_html(acc.get('first_name', 'N/A'))
-        username_str = f"@{escape_html(acc.get('username'))}" if acc.get('username') else 'N/A'
-        phone_str = escape_html(acc.get('phone_number', 'N/A'))
-        user_id = acc.get('user_id')
-        unique_name = escape_html(acc.get('unique_name'))
-
-        # Create the clickable mention
-        name_display = ""
-        if user_id:
-            # Use tg://user?id= link which is the most reliable mention
-            name_display = f"<a href=\"tg://user?id={user_id}\">{first_name}</a>"
-        else:
-            name_display = first_name
+            # 1. Build Name Display
+            name_display = ""
+            if user_id:
+                # Use tg://user?id= link which is the most reliable mention
+                name_display = f"<a href=\"tg://user?id={user_id}\">{first_name}</a>"
+            else:
+                name_display = first_name
             
-        # Add unique name in code block if it exists
-        if unique_name:
-            name_display += f" (<code>{unique_name}</code>)"
+            if unique_name:
+                name_display += f" (<code>{unique_name}</code>)"
 
-        text = (
-            f"<b>Name:</b> {name_display}\n"
-            f"<b>Username:</b> {username_str}\n"
-            f"<b>Phone:</b> <code>{phone_str}</code>\n"
-            f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>\n"
-            f"{'-'*25}"
-        )
-        
-        # Reply to the original query's message to keep things grouped
-        await query.message.reply_html(text)
+            # 2. Build Text Entry for this account
+            entry_text = (
+                f"<b>Name:</b> {name_display}\n"
+                f"<b>Username:</b> {username_str}\n"
+                f"<b>Phone:</b> <code>{phone_str}</code>\n"
+                f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
+            )
+            text_parts.append(entry_text)
 
-    # Finally, send the "Back" button
-    await query.message.reply_text(
-        "Click here to go back:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]])
+    # 3. Join all parts
+    final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
+
+    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 4. Edit the message
+    await query.edit_message_text(
+        text=final_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True # Prevents issues with tg:// links
     )
 
 @owner_only
@@ -340,7 +347,7 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
         
     await asyncio.sleep(3)
-    await settings_command(update, context)
+    await settings_command(update, context) # Show settings menu again
 
 @owner_only
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
@@ -351,6 +358,7 @@ async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step
 
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback for the 'Pause Notifications' button."""
     query = update.callback_query
     await query.answer()
     
@@ -366,7 +374,7 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
         return
 
     paused_notifications.add(OWNER_ID)
-    context.bot_data[pause_id] = True
+    context.bot_data[pause_id] = True # True means notifications ARE now paused
     
     await query.edit_message_text(
         f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
@@ -381,10 +389,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
+    # This check is to avoid collision with conversation handler
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')): return
     if step in ['awaiting_single_account', 'awaiting_multiple_accounts']:
-        pass
+        pass # Allow these to proceed
     else:
+        # If it's not a recognized 'next_step', ignore it
         return 
 
     del context.user_data['next_step']
@@ -395,6 +405,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
         success, fail = 0, 0
         for session in session_strings:
+            # Note: This flow does not add a unique_name
             status, _, detail = await start_userbot(session, context.application, update_info=True)
             if status == "success": success += 1
             else: fail += 1
@@ -405,6 +416,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for pasting a single string. Asks for unique name."""
     query = update.callback_query
     await query.answer()
     await query.message.reply_text("Please send a unique name (e.g., 'main_acct') for this new account. Send /cancel to stop.")
@@ -412,11 +424,12 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
 
 @owner_only
 async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    unique_name = update.message.text.strip().split()[0]
+    """Saves unique name and asks for session string."""
+    unique_name = update.message.text.strip().split()[0] # Take first word
     
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text("That name is already taken. Please choose another one.")
-        return UNIQUE_NAME_PASTE
+        return UNIQUE_NAME_PASTE # Stay in this state
         
     context.user_data['unique_name'] = unique_name
     await update.message.reply_text("Great. Now please paste the session string.")
@@ -424,6 +437,7 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
 
 @owner_only
 async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gets session string, adds account, and ends conversation."""
     session_string = clean_session_string(update.message.text)
     unique_name = context.user_data.get('unique_name')
     
