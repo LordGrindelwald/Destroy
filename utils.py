@@ -44,7 +44,8 @@ async def get_account_from_arg(arg: str):
     Finds an account by its user_id or unique_name.
     Returns the full account document from MongoDB.
     """
-    if not accounts_collection:
+    # --- MODIFIED: Correct DB connection check ---
+    if accounts_collection is None:
         return None
         
     account = None
