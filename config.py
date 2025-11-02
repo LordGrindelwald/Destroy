@@ -17,10 +17,17 @@ API_HASH = os.getenv("API_HASH")
 
 # --- Database & In-Memory State ---
 try:
-    # MODIFIED: Added a 5-second server selection timeout
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    # MODIFIED: Added connectTimeoutMS and socketTimeoutMS
+    # This forces all operations (not just the first) to time out after 5 seconds
+    # instead of hanging indefinitely.
+    client = MongoClient(
+        MONGO_URI, 
+        serverSelectionTimeoutMS=5000, 
+        connectTimeoutMS=5000, 
+        socketTimeoutMS=5000
+    )
     
-    # MODIFIED: Force a connection check to catch errors *now*
+    # Force a connection check to catch errors *now*
     client.server_info() 
     
     db = client.userbot_manager

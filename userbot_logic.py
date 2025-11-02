@@ -5,7 +5,8 @@ from functools import partial
 
 from pyrogram import Client as PyrogramClient, filters as PyrogramFilters
 from pyrogram.errors import (
-    AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait
+    AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
+    AuthKeyDuplicated  # --- MODIFIED: Import AuthKeyDuplicated ---
 )
 from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 from pyrogram.types import Message
@@ -129,8 +130,9 @@ async def start_userbot(
             )
         return "success", me, "Successfully started."
     
-    except (AuthKeyUnregistered, UserDeactivated):
-        error_detail = "Session string has expired or been revoked. Please generate a new one."
+    # --- MODIFIED: Added AuthKeyDuplicated here ---
+    except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated):
+        error_detail = "Session string has expired or been revoked (AuthKey). Please generate a new one."
         return "invalid_session", None, error_detail
     except (ApiIdInvalid, TypeError):
         error_detail = "Your API_ID or API_HASH is invalid. Please check your environment variables."
