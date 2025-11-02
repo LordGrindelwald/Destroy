@@ -8,13 +8,18 @@ from telegram.ext import (
 )
 
 # Import from our own modules
-from config import BOT_TOKEN, logger
+# --- MODIFIED ---
+from config import (
+    BOT_TOKEN, logger, MONGO_URI, 
+    OWNER_ID, API_ID, API_HASH
+)
+# --- END MODIFIED ---
 from userbot_logic import start_all_userbots_from_db
 from session_generator import gen_conv # Import generate flow
 from bot_handlers import (
-    start_command, settings_command, add_command, remove_command, # Note: remove_command
+    start_command, settings_command, add_command, remove_command,
     status_command, temp_pause_command, temp_pause_all, ping_command,
-    refresh_command, cancel_command, set_unique_name_command, # Note: xadd command
+    refresh_command, cancel_command, set_unique_name_command,
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
     paste_single_conv # Import paste flow
@@ -27,6 +32,7 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
     
     async def post_init_task(app: Application):
+        """Task to run after bot is initialized but before polling."""
         await app.bot.get_me()
         logger.info(f"Management bot @{app.bot.username} started.")
         await start_all_userbots_from_db(app)
@@ -43,8 +49,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
-    application.add_handler(CommandHandler("remove", remove_command)) # Changed
-    application.add_handler(CommandHandler("xadd", set_unique_name_command)) # Added
+    application.add_handler(CommandHandler("remove", remove_command))
+    application.add_handler(CommandHandler("xadd", set_unique_name_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("temp", temp_pause_command))
     application.add_handler(CommandHandler("temp_fwd", temp_pause_all))
@@ -54,8 +60,6 @@ def main() -> None:
     
     # 3. CallbackQuery Handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
-    # 'add_single' is now an entry point for paste_single_conv
-    # 'call_generate' is now an entry point for gen_conv
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
@@ -70,6 +74,7 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == "__main__":
+    # The variables are now imported and accessible
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
     elif not all([MONGO_URI, OWNER_ID, API_ID, API_HASH]):
