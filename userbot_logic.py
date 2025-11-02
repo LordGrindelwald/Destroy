@@ -89,16 +89,17 @@ async def start_userbot(
     """
     me = None
     try:
+        # MODIFIED: Use a unique name for persistent session storage
+        # This will be either the unique_name or the last 8 chars of the session string if no name is available
+        session_prefix = unique_name if unique_name else session_string[-8:]
         client = Client(
-            name=":memory:",
+            name=f"session_{session_prefix}", 
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
             session_string=session_string,
-            in_memory=True,
-            # FINAL STABILITY FIX: Disable background noise
+            # REMOVED: in_memory=True to enable file persistence (stable session loading)
             workers=1,
-            no_updates=True, 
-            # Removed: timeout, sleep_threshold, connection_timeout, proxy, test_mode
+            # All other stability flags removed
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
@@ -121,7 +122,7 @@ async def start_userbot(
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         
         source_chat_id = await get_source_chat()
-        # This explicitly tells Pyrogram to handle messages despite no_updates=True
+        # This explicitly tells Pyrogram to handle messages again
         client.add_handler(MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service

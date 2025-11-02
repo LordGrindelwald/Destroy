@@ -55,15 +55,15 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
+    # MODIFIED: Use unique user ID for temporary file session name
     client = Client(
-        name=":memory:",
+        name=f"temp_gen_{update.effective_user.id}", 
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
-        in_memory=True,
-        # FINAL STABILITY FIX: Disable background noise
+        # REMOVED: in_memory=True
         workers=1,
         no_updates=True,
-        # Removed: timeout, sleep_threshold, connection_timeout, proxy, test_mode
+        # All other stability flags removed
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
