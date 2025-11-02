@@ -61,7 +61,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
-    application.add_handler(CallbackQueryCallbackHandler(add_command, pattern="^call_add_command$"))
+    # --- MODIFIED: Fixed typo from CallbackQueryCallbackHandler ---
+    application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
     
