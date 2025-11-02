@@ -182,7 +182,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.application.bot.username
     
     status_text = (f"<b>Bot Status</b>\n"
-                   f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                   f"━━━━━━━━━━━━━━━━━━━━\n"
                    f"<b>Accounts Active:</b> {running_bots}/{total_bots}\n"
                    f"<b>Paused OTP Destruction:</b> {len(paused_forwarding)} bots\n"
                    f"<b>Paused OTP Forwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
@@ -259,7 +259,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await asyncio.sleep(2)
 
-    await msg.edit_text("🔄 Restarting and refreshing userbot details...")
+    await msg.edit_text("🔄 Restarting and refreshing account info...")
     
     total_bots = 0
     if accounts_collection is not None:
@@ -275,7 +275,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     running_bots = len(active_userbots)
-    final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} userbots."
+    final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} accounts."
 
     if errors:
         error_message = "\n\n❌ <b>Errors Encountered:</b>\n" + "\n".join(errors)
@@ -332,8 +332,8 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             entry_text = (
                 f"{name_display}\n"
-                f"{username_str}\n"
-                f"<code>+{phone_str}</code>\n"
+                f"<b>User:</b> {username_str}\n"
+                f"<b>Phone:</b> <code>+{phone_str}</code>\n"
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
