@@ -97,8 +97,13 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Signed in! Generating session and adding account...")
         session_string = await client.export_session_string()
         
+        # --- MODIFIED: Set run_acquaintance=True ---
         status, user_info, detail = await start_userbot(
-            session_string, context.application, update_info=True, unique_name=unique_name
+            session_string, 
+            context.application, 
+            update_info=True, 
+            unique_name=unique_name,
+            run_acquaintance=True
         )
         
         if status == "success":
@@ -131,8 +136,13 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Password correct! Generating session and adding account...")
         session_string = await client.export_session_string()
         
+        # --- MODIFIED: Set run_acquaintance=True ---
         status, user_info, detail = await start_userbot(
-            session_string, context.application, update_info=True, unique_name=unique_name
+            session_string, 
+            context.application, 
+            update_info=True, 
+            unique_name=unique_name,
+            run_acquaintance=True
         )
         
         if status == "success":

@@ -268,7 +268,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
         return
         
-    # --- MODIFIED: Removed force_acquaintance. It now happens automatically once. ---
+    # This call now correctly uses update_info=True but run_acquaintance=False
     _, _, errors = await start_all_userbots_from_db(
         context.application, 
         update_info=True
@@ -441,6 +441,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     success, fail = 0, 0
     for session in session_strings:
+        # This call correctly uses update_info=True but run_acquaintance=False
         status, _, detail = await start_userbot(session, context.application, update_info=True)
         if status == "success": success += 1
         else: fail += 1
@@ -487,8 +488,13 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
+    # --- MODIFIED: Set run_acquaintance=True ---
     status, user_info, detail = await start_userbot(
-        session_string, context.application, update_info=True, unique_name=unique_name
+        session_string, 
+        context.application, 
+        update_info=True, 
+        unique_name=unique_name,
+        run_acquaintance=True
     )
     
     if status == "success":

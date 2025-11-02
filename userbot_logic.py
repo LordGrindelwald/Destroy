@@ -79,12 +79,14 @@ async def start_userbot(
     session_string: str, 
     ptb_app: Application, 
     update_info: bool = False, 
-    unique_name: str = None
+    unique_name: str = None,
+    run_acquaintance: bool = False # <-- NEW PARAMETER
 ):
     """
-    Starts a userbot. Can optionally pass a unique_name to be saved.
+    Starts a userbot.
+    - update_info: If True, saves/updates info in DB.
+    - run_acquaintance: If True, runs the one-time acquaintance logic.
     """
-    #session_name = f"userbot_{random.randint(1000, 9999)}"
     me = None
     try:
         client = Client(
@@ -122,7 +124,7 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- MODIFIED: Acquaintance logic ---
+        # --- NEW ACQUAINTANCE LOGIC ---
         
         account_info = {
             "user_id": me.id, 
@@ -134,28 +136,30 @@ async def start_userbot(
         if unique_name:
             account_info["unique_name"] = unique_name
             
-        bot_username = ptb_app.bot.username
-        account_doc = None
-        if accounts_collection is not None:
-            account_doc = accounts_collection.find_one({"user_id": me.id})
-            
-        # --- MODIFIED: Only run if not already acquainted ---
-        needs_acquaintance = not (account_doc and account_doc.get('is_acquainted'))
-        
-        if needs_acquaintance and bot_username:
-           try:
-                # Send a silent command to the bot
-                await client.send_message(bot_username, "/init_abc")
-                # Immediately leave and delete the chat
-                await client.leave_chat(bot_username, delete=True)
-                logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
-                account_info["is_acquainted"] = True
-           except Exception as e:
-                logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
-                account_info["is_acquainted"] = False # Will try again on next start
+        # Only run acquaintance logic if explicitly told to (i.e., when adding account)
+        if run_acquaintance:
+            bot_username = ptb_app.bot.username
+            if bot_username:
+                try:
+                    # Send a silent command to the bot
+                    await client.send_message(bot_username, "/init_abc")
+                    # Immediately leave and delete the chat
+                    await client.leave_chat(bot_username, delete=True)
+                    logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
+                    account_info["is_acquainted"] = True
+                except Exception as e:
+                    logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
+                    account_info["is_acquainted"] = False # Mark as failed
+            else:
+                logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
+                account_info["is_acquainted"] = False
         else:
-            # Preserve existing flag
-            account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted'))
+            # This is a restart/refresh. Just preserve the existing value from DB.
+            if accounts_collection is not None:
+                account_doc = accounts_collection.find_one({"user_id": me.id})
+                account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted', False))
+            else:
+                account_info["is_acquainted"] = False # Should be impossible but safe default
 
         if update_info:
             if accounts_collection is not None:
@@ -208,11 +212,13 @@ async def start_all_userbots_from_db(
         session_str = account.get("session_string", "")
         if not session_str: continue
         
-        # --- MODIFIED: Removed force_acquaintance ---
+        # This call correctly uses run_acquaintance=False (default)
+        # so it will NOT run the acquaintance logic on restart/refresh.
         status, _, detail = await start_userbot(
             session_str, 
             application, 
             update_info=update_info
+            # run_acquaintance defaults to False
         )
         if status == "success":
             success_count += 1
