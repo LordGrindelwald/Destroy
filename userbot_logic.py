@@ -96,10 +96,9 @@ async def start_userbot(
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
             session_string=session_string,
-            # REMOVED: in_memory=True to enable file persistence
+            # REMOVED: in_memory=True to enable file persistence (stable session loading)
             workers=1,
-            # FINAL STABILITY FIX: Aggressively suppress FloodWait logic
-            sleep_threshold=9999,
+            # REMOVED: sleep_threshold=9999 to eliminate conflicting retry logic
             device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,

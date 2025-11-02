@@ -63,8 +63,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # REMOVED: in_memory=True
         workers=1,
         no_updates=True,
-        # FINAL STABILITY FIX: Aggressively suppress FloodWait logic
-        sleep_threshold=9999,
+        # REMOVED: sleep_threshold=9999 to eliminate conflicting retry logic
         device_model=generate_device_name(), # Use random device name
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
@@ -161,7 +160,7 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
-        if client.is_connected: await client.disconnect()
+        if client and client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
 
