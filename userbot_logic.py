@@ -79,8 +79,7 @@ async def start_userbot(
     session_string: str, 
     ptb_app: Application, 
     update_info: bool = False, 
-    unique_name: str = None,
-    force_acquaintance: bool = False # --- MODIFIED: New argument ---
+    unique_name: str = None
 ):
     """
     Starts a userbot. Can optionally pass a unique_name to be saved.
@@ -94,7 +93,7 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             in_memory=True,
-            device_model=generate_device_name(), # Use random device name
+            device_model=generate_device_name(), 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
             lang_code=TD_LANG_CODE,
@@ -123,9 +122,8 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- MODIFIED: Acquaintance logic added ---
+        # --- MODIFIED: Acquaintance logic ---
         
-        # 1. Prepare account_info dict first
         account_info = {
             "user_id": me.id, 
             "first_name": me.first_name, 
@@ -136,28 +134,29 @@ async def start_userbot(
         if unique_name:
             account_info["unique_name"] = unique_name
             
-        # 2. Check if acquaintance message is needed
         bot_username = ptb_app.bot.username
         account_doc = None
         if accounts_collection is not None:
             account_doc = accounts_collection.find_one({"user_id": me.id})
             
-        needs_acquaintance = force_acquaintance or not (account_doc and account_doc.get('is_acquainted'))
+        # --- MODIFIED: Only run if not already acquainted ---
+        needs_acquaintance = not (account_doc and account_doc.get('is_acquainted'))
         
         if needs_acquaintance and bot_username:
             try:
-                # Send a message to the bot to "meet" it
-                await client.send_message(bot_username, "/start acquaintance_check")
-                logger.info(f"Account {me.id} sent acquaintance message to @{bot_username}")
+                # Send a silent command to the bot
+                await client.send_message(bot_username, "/init_abc")
+                # Immediately delete the chat
+                await client.delete_chat(bot_username)
+                logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                 account_info["is_acquainted"] = True
             except Exception as e:
-                logger.warning(f"Could not send acquaintance message from {me.id} to @{bot_username}: {e}")
-                account_info["is_acquainted"] = False # Will try again on next refresh
+                logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
+                account_info["is_acquainted"] = False # Will try again on next start
         else:
-            # Mark as acquainted if it already was, or if we're not forcing it
+            # Preserve existing flag
             account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted'))
 
-        # 3. Save to DB if update_info is True
         if update_info:
             if accounts_collection is not None:
                 accounts_collection.update_one(
@@ -195,8 +194,7 @@ async def start_userbot(
 
 async def start_all_userbots_from_db(
     application: Application, 
-    update_info: bool = False, 
-    force_acquaintance: bool = False # --- MODIFIED: New argument ---
+    update_info: bool = False
 ):
     if accounts_collection is None:
         logger.error("Database not connected. Cannot start userbots from DB.")
@@ -210,12 +208,11 @@ async def start_all_userbots_from_db(
         session_str = account.get("session_string", "")
         if not session_str: continue
         
-        # --- MODIFIED: Pass force_acquaintance flag ---
+        # --- MODIFIED: Removed force_acquaintance ---
         status, _, detail = await start_userbot(
             session_str, 
             application, 
-            update_info=update_info, 
-            force_acquaintance=force_acquaintance
+            update_info=update_info
         )
         if status == "success":
             success_count += 1

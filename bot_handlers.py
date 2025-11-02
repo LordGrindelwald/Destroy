@@ -154,23 +154,18 @@ async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_
         return
         
     identifier = context.args[0]
-    # --- MODIFIED: Force new_name to lowercase ---
     new_name = context.args[1].lower()
     
-    # Find the account to update *first*
     account = await get_account_from_arg(identifier)
     if not account:
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
 
-    # Check if new_name is already taken (by a *different* account)
-    # This check is now case-insensitive because new_name is lowercase
     existing_with_name = accounts_collection.find_one({"unique_name": new_name})
     if existing_with_name and existing_with_name["user_id"] != account["user_id"]:
         await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
-    # Update the account
     accounts_collection.update_one(
         {"user_id": account["user_id"]},
         {"$set": {"unique_name": new_name}}
@@ -226,7 +221,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
-        context.bot_data[pause_id] = False # False means notifications are NOT paused by default
+        context.bot_data[pause_id] = False 
 
         paused_forwarding.add(user_id_to_pause)
         
@@ -236,7 +231,7 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         context.application.job_queue.run_once(
             callback=resume_forwarding_job,
-            when=300, # 5 minutes
+            when=300, 
             data={'user_id': user_id_to_pause, 'pause_id': pause_id, 'message_id': message.message_id},
             name=f"resume_{pause_id}"
         )
@@ -272,7 +267,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await asyncio.sleep(2)
 
-    await msg.edit_text("🔄 Restarting, refreshing details, and acquainting bots...")
+    await msg.edit_text("🔄 Restarting and refreshing userbot details...")
     
     total_bots = 0
     if accounts_collection is not None:
@@ -281,11 +276,10 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
         return
         
-    # --- MODIFIED: Force acquaintance on all bots during refresh ---
+    # --- MODIFIED: Removed force_acquaintance. It now happens automatically once. ---
     _, _, errors = await start_all_userbots_from_db(
         context.application, 
-        update_info=True, 
-        force_acquaintance=True
+        update_info=True
     )
     
     running_bots = len(active_userbots)
@@ -335,11 +329,8 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = acc.get('user_id')
             unique_name = escape_html(acc.get('unique_name'))
 
-            # 1. Build Name Display
             name_display = ""
-            # --- MODIFIED: Mention will only work if user_id exists ---
             if user_id:
-                # Use tg://user?id= link which is the most reliable mention
                 name_display = f"<a href=\"tg://user?id={user_id}\">{first_name}</a>"
             else:
                 name_display = f"{first_name} (<i>No mention</i>)"
@@ -347,7 +338,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if unique_name:
                 name_display += f" (<code>{unique_name}</code>)"
 
-            # 2. Build Text Entry for this account
             entry_text = (
                 f"<b>Name:</b> {name_display}\n"
                 f"<b>Username:</b> {username_str}\n"
@@ -356,18 +346,16 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             text_parts.append(entry_text)
 
-    # 3. Join all parts
     final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
 
     keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # 4. Edit the message
     await query.edit_message_text(
         text=final_text,
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup,
-        disable_web_page_preview=True # Prevents issues with tg:// links
+        disable_web_page_preview=True 
     )
 
 @owner_only
@@ -394,7 +382,7 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
         
     await asyncio.sleep(3)
-    await settings_command(update, context) # Show settings menu again
+    await settings_command(update, context) 
 
 @owner_only
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
@@ -421,7 +409,7 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
         return
 
     paused_notifications.add(OWNER_ID)
-    context.bot_data[pause_id] = True # True means notifications ARE now paused
+    context.bot_data[pause_id] = True 
     
     await query.edit_message_text(
         f"{query.message.text}\n\n<i>✅ Notifications also paused for the remainder of the 5-minute window.</i>",
@@ -436,12 +424,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get('next_step')
     if not step: return
 
-    # This check is to avoid collision with conversation handler
     if 'awaiting' in step and step.endswith(('phone_number', 'login_code', '2fa_password')): return
     if step in ['awaiting_single_account', 'awaiting_multiple_accounts']:
-        pass # Allow these to proceed
+        pass 
     else:
-        # If it's not a recognized 'next_step', ignore it
         return 
 
     del context.user_data['next_step']
@@ -457,7 +443,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success, fail = 0, 0
         for session in session_strings:
-            # Note: This flow does not add a unique_name
             status, _, detail = await start_userbot(session, context.application, update_info=True)
             if status == "success": success += 1
             else: fail += 1
@@ -477,7 +462,6 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
 @owner_only
 async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name and asks for session string."""
-    # --- MODIFIED: Force unique_name to lowercase ---
     unique_name = update.message.text.strip().split()[0].lower()
     
     if accounts_collection is None:
@@ -486,7 +470,7 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
 
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text("That name is already taken. Please choose another one.")
-        return UNIQUE_NAME_PASTE # Stay in this state
+        return UNIQUE_NAME_PASTE 
         
     context.user_data['unique_name'] = unique_name
     await update.message.reply_text("Great. Now please paste the session string.")

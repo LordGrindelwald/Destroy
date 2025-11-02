@@ -1,14 +1,15 @@
 from functools import partial
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     filters,
+    ContextTypes,
 )
 
 # Import from our own modules
-# --- MODIFIED: Removed API_ID and API_HASH from import ---
 from config import (
     BOT_TOKEN, logger, MONGO_URI, 
     OWNER_ID
@@ -23,6 +24,11 @@ from bot_handlers import (
     pause_notifications_callback, handle_text_input,
     paste_single_conv # Import paste flow
 )
+
+# --- MODIFIED: New dummy function for silent command ---
+async def do_nothing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Does absolutely nothing."""
+    return
 
 def main() -> None:
     """Configures and runs the bot."""
@@ -56,12 +62,13 @@ def main() -> None:
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    # --- MODIFIED: Add silent handler for acquaintance ---
+    application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers
     application.add_handler(CallbackQueryHandler(pause_notifications_callback, pattern=r"^pause_notify_"))
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
-    # --- MODIFIED: Fixed typo from CallbackQueryCallbackHandler ---
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
     application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
@@ -76,7 +83,6 @@ def main() -> None:
 if __name__ == "__main__":
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
-    # --- MODIFIED: Removed API_ID and API_HASH from this check ---
     elif not all([MONGO_URI, OWNER_ID]):
         logger.critical("One or more environment variables (MONGO_URI, OWNER_ID) are missing.")
     else:
