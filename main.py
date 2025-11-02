@@ -90,17 +90,13 @@ async def main() -> None:
     except Exception as e:
         logger.critical(f"Bot failed to start: {e}")
     finally:
+        # MODIFIED: ONLY shut down Pyrogram clients here. 
+        # run_polling() or asyncio.run handles the application.stop/shutdown calls.
         logger.info("Shutting down userbots...")
         for client in active_userbots.values():
             if client.is_connected:
                 await client.stop()
         
-        logger.info("Stopping bot...")
-        # Since we use run_polling, we don't need updater stop/start/shutdown logic 
-        # unless a graceful shutdown signal is caught, but leaving the general 
-        # structure ensures cleanup if the loop is broken.
-        await application.stop()
-        await application.shutdown()
         logger.info("Shutdown complete.")
 
 
