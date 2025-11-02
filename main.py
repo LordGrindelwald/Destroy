@@ -31,14 +31,39 @@ async def do_nothing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Does absolutely nothing."""
     return
 
-# --- MODIFIED: Main function is now async ---
-async def main() -> None:
-    """Configures and runs the bot non-blockingly."""
+# --- NEW: Asynchronous startup logic for Pyrogram clients ---
+async def post_init_tasks(application: Application):
+    """Runs after the bot application initializes."""
+    await application.bot.get_me()
+    logger.info(f"Management bot @{application.bot.username} started.")
+    
+    # Start userbots
+    await start_all_userbots_from_db(application)
+    
+    logger.info("Bot is now running. Press Ctrl-C to stop.")
+
+# --- NEW: Asynchronous shutdown logic for Pyrogram clients ---
+async def post_shutdown_tasks(application: Application):
+    """Runs before the bot application shuts down."""
+    logger.info("Shutting down userbots...")
+    for client in active_userbots.values():
+        if client.is_connected:
+            await client.stop()
+    
+    logger.info("Shutdown complete.")
+
+# --- MODIFIED: main() is now a SYNCHRONOUS function ---
+def main() -> None:
+    """Configures and runs the bot."""
     
     # --- Application Setup ---
-    application = Application.builder().token(BOT_TOKEN).build()
+    # MODIFIED: Use post_init and post_shutdown for async logic
+    application = Application.builder().token(BOT_TOKEN) \
+        .post_init(post_init_tasks) \
+        .post_shutdown(post_shutdown_tasks) \
+        .build()
 
-    # --- Register Handlers ---
+    # --- Register Handlers (all handlers remain the same) ---
     
     # 1. Conversation Handlers
     application.add_handler(gen_conv, group=0)
@@ -70,33 +95,16 @@ async def main() -> None:
     # 4. Message Handler (must be low priority)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
-    # --- MODIFIED: Initialization is now outside the final try block ---
+    # --- MODIFIED: Start the bot blocking (synchronously) ---
     logger.info("Bot is starting...")
     
-    # Run initialization tasks
-    await application.initialize()
-    await application.bot.get_me()
-    logger.info(f"Management bot @{application.bot.username} started.")
-    
-    # Start userbots
-    await start_all_userbots_from_db(application)
-    
-    logger.info("Bot is now running. Press Ctrl-C to stop.")
-    
     try:
-        # Start polling. Any exception here will be handled by the outer asyncio.run
-        await application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
+        # run_polling() is the final, synchronous, blocking call 
+        # that handles the event loop correctly.
+        application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
         
-    # We remove the "except Exception as e:" block here to allow exceptions 
-    # to propagate for proper event loop cleanup.
-    finally:
-        # ONLY shut down Pyrogram clients here.
-        logger.info("Shutting down userbots...")
-        for client in active_userbots.values():
-            if client.is_connected:
-                await client.stop()
-        
-        logger.info("Shutdown complete.")
+    except Exception as e:
+        logger.critical(f"Bot failed during polling: {e}")
 
 
 if __name__ == "__main__":
@@ -105,8 +113,8 @@ if __name__ == "__main__":
     elif not all([MONGO_URI, OWNER_ID]):
         logger.critical("One or more environment variables (MONGO_URI, OWNER_ID) are missing.")
     else:
-        # --- MODIFIED: Use asyncio.run to start the async main function ---
+        # --- MODIFIED: Call main() directly without asyncio.run ---
         try:
-            asyncio.run(main())
+            main()
         except KeyboardInterrupt:
             logger.info("Bot stopped manually.")
