@@ -56,7 +56,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
     client = Client(
-        name=f"userbot_{random.randint(1000, 9999)}",
+        name=":memory:",
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
         in_memory=True,

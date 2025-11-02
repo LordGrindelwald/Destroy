@@ -84,11 +84,11 @@ async def start_userbot(
     """
     Starts a userbot. Can optionally pass a unique_name to be saved.
     """
-    session_name = f"userbot_{random.randint(1000, 9999)}"
+    #session_name = f"userbot_{random.randint(1000, 9999)}"
     me = None
     try:
         client = Client(
-            name=session_name,
+            name=":memory:",
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
             session_string=session_string,
