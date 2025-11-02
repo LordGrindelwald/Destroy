@@ -89,6 +89,12 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     if context.args:
         identifier = context.args[0]
+        
+        # --- Check DB connection ---
+        if not accounts_collection:
+            await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
+            return
+            
         account = await get_account_from_arg(identifier)
         
         if not account:
@@ -113,6 +119,10 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     else:
         # No args, show menu
+        if not accounts_collection:
+            await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
+            return
+            
         accounts = list(accounts_collection.find())
         if not accounts:
             await update.message.reply_html("There are no accounts to remove.")
@@ -132,26 +142,32 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_html("Please select an account to remove:", reply_markup=reply_markup)
 
-# --- MODIFIED: Added @owner_only decorator ---
+# --- MODIFIED: Fixed silent crash bug ---
 @owner_only
 async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /xadd <identifier> <new_name>"""
+    
+    # --- NEW: Check for DB connection first ---
+    if not accounts_collection:
+        await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text("Usage: /xadd <user_id_or_name> <new_unique_name>")
         return
         
     identifier, new_name = context.args
     
-    # Check if new_name is already taken
-    existing_with_name = accounts_collection.find_one({"unique_name": new_name})
-    if existing_with_name:
-        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
-        return
-        
-    # Find the account to update
+    # Find the account to update *first*
     account = await get_account_from_arg(identifier)
     if not account:
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
+        return
+
+    # Check if new_name is already taken (by a *different* account)
+    existing_with_name = accounts_collection.find_one({"unique_name": new_name})
+    if existing_with_name and existing_with_name["user_id"] != account["user_id"]:
+        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
     # Update the account
@@ -168,7 +184,11 @@ async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_
 
 @owner_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
+    total_bots = 0
+    if accounts_collection:
+        total_bots = accounts_collection.count_documents({})
+        
+    running_bots = len(active_userbots)
     bot_username = context.application.bot.username
     
     status_text = (f"📊 <b>Bot Status</b>\n"
@@ -186,6 +206,11 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Pauses a single userbot's OTP processing using the job queue."""
     if not context.args:
         await update.message.reply_text("Usage: /temp <user_id_or_name>")
+        return
+        
+    # --- Check DB connection ---
+    if not accounts_collection:
+        await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
         return
 
     try:
@@ -249,9 +274,17 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(2)
 
     await msg.edit_text("🔄 Restarting and refreshing userbot details...")
+    
+    total_bots = 0
+    if accounts_collection:
+        total_bots = accounts_collection.count_documents({})
+    else:
+        await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
+        return
+        
     _, _, errors = await start_all_userbots_from_db(context.application, update_info=True)
     
-    running_bots, total_bots = len(active_userbots), accounts_collection.count_documents({})
+    running_bots = len(active_userbots)
     final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} userbots."
 
     if errors:
@@ -278,6 +311,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    if not accounts_collection:
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
+        return
+        
     accounts = list(accounts_collection.find())
     
     base_text = "👤 <b>Your Managed Accounts:</b>\n\n"
@@ -332,6 +370,11 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    if not accounts_collection:
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
+        return
+        
     user_id_to_delete = int(query.data.split("_")[2])
     
     if user_id_to_delete in active_userbots:
@@ -403,6 +446,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
         msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
+        
+        if not accounts_collection:
+            await msg.edit_text("⚠️ Database connection is not available. Cannot add accounts.")
+            return
+
         success, fail = 0, 0
         for session in session_strings:
             # Note: This flow does not add a unique_name
@@ -427,6 +475,10 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
     """Saves unique name and asks for session string."""
     unique_name = update.message.text.strip().split()[0] # Take first word
     
+    if not accounts_collection:
+        await update.message.reply_text("⚠️ Database connection is not available. Please /cancel and try again.")
+        return ConversationHandler.END
+
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text("That name is already taken. Please choose another one.")
         return UNIQUE_NAME_PASTE # Stay in this state
@@ -443,6 +495,11 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
     
     msg = await update.message.reply_text("⏳ Processing session string...")
     
+    if not accounts_collection:
+        await msg.edit_text("⚠️ Database connection is not available. Cannot add account.")
+        context.user_data.clear()
+        return ConversationHandler.END
+        
     status, user_info, detail = await start_userbot(
         session_string, context.application, update_info=True, unique_name=unique_name
     )
