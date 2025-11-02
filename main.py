@@ -70,28 +70,27 @@ async def main() -> None:
     # 4. Message Handler (must be low priority)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
     
-    # --- MODIFIED: Start the bot non-blockingly ---
+    # --- MODIFIED: Initialization is now outside the final try block ---
     logger.info("Bot is starting...")
     
-    # Run the post_init_task manually *before* starting the poller
+    # Run initialization tasks
+    await application.initialize()
+    await application.bot.get_me()
+    logger.info(f"Management bot @{application.bot.username} started.")
+    
+    # Start userbots
+    await start_all_userbots_from_db(application)
+    
+    logger.info("Bot is now running. Press Ctrl-C to stop.")
+    
     try:
-        await application.initialize()
-        await application.bot.get_me()
-        logger.info(f"Management bot @{application.bot.username} started.")
-        
-        # Start userbots
-        await start_all_userbots_from_db(application)
-        
-        logger.info("Bot is now running. Press Ctrl-C to stop.")
-        
-        # MODIFIED: Use run_polling for robust polling and loop control
+        # Start polling. Any exception here will be handled by the outer asyncio.run
         await application.run_polling(poll_interval=0.5, allowed_updates=Update.ALL_TYPES)
         
-    except Exception as e:
-        logger.critical(f"Bot failed to start: {e}")
+    # We remove the "except Exception as e:" block here to allow exceptions 
+    # to propagate for proper event loop cleanup.
     finally:
-        # MODIFIED: ONLY shut down Pyrogram clients here. 
-        # run_polling() or asyncio.run handles the application.stop/shutdown calls.
+        # ONLY shut down Pyrogram clients here.
         logger.info("Shutting down userbots...")
         for client in active_userbots.values():
             if client.is_connected:
