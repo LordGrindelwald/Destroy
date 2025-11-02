@@ -1,7 +1,8 @@
 import asyncio
 import random
-from pyroblack import Client
-from pyroblack.errors import SessionPasswordNeeded
+# --- MODIFIED: Imports are from pyrogram, as per your documentation ---
+from pyrogram import Client
+from pyrogram.errors import SessionPasswordNeeded
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     CommandHandler,
@@ -14,7 +15,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # Import from our own modules
-# --- MODIFIED: Import all TD_ prefixed config values ---
 from config import (
     accounts_collection, logger, 
     UNIQUE_NAME_GEN, PHONE, CODE, PASSWORD,
@@ -41,7 +41,6 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     """Saves unique name and asks for phone number."""
     unique_name = update.message.text.strip().split()[0] # Take first word
     
-    # Check if name is taken
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text("That name is already taken. Please choose another one.")
         return UNIQUE_NAME_GEN # Stay in this state
@@ -55,7 +54,6 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
-    # --- MODIFIED: Use all TD_ prefixed device values ---
     client = Client(
         name=f"userbot_{random.randint(1000, 9999)}",
         api_id=TD_API_ID,
@@ -95,7 +93,6 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.sign_in(phone, phone_code_hash, code)
         
-        # --- AUTO ADD ---
         await msg.edit_text("✅ Signed in! Generating session and adding account...")
         session_string = await client.export_session_string()
         
@@ -130,7 +127,6 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.check_password(password)
 
-        # --- AUTO ADD ---
         await msg.edit_text("✅ Password correct! Generating session and adding account...")
         session_string = await client.export_session_string()
         
@@ -163,7 +159,6 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Action cancelled.")
     return ConversationHandler.END
 
-# --- Define the ConversationHandler ---
 gen_conv = ConversationHandler(
     entry_points=[
         CommandHandler("generate", generate_command), 

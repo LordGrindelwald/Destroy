@@ -3,18 +3,18 @@ import random
 import traceback
 from functools import partial
 
-from pyroblack import Client, filters
-from pyroblack.errors import (
+# --- MODIFIED: Imports are from pyrogram, as per your documentation ---
+from pyrogram import Client, filters
+from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
     AuthKeyDuplicated
 )
-from pyroblack.handlers import MessageHandler
-from pyroblack.types import Message
+from pyrogram.handlers import MessageHandler
+from pyrogram.types import Message
 from telegram.constants import ParseMode
 from telegram.ext import Application
 
 # Import from our own modules
-# --- MODIFIED: Import all TD_ prefixed config values ---
 from config import (
     active_userbots, paused_forwarding, 
     paused_notifications, accounts_collection, logger, OWNER_ID,
@@ -88,7 +88,6 @@ async def start_userbot(
     session_name = f"userbot_{random.randint(1000, 9999)}"
     me = None
     try:
-        # --- MODIFIED: Use all TD_ prefixed device values ---
         client = Client(
             name=session_name,
             api_id=TD_API_ID,
@@ -132,7 +131,6 @@ async def start_userbot(
                 "phone_number": me.phone_number, 
                 "session_string": session_string,
             }
-            # Add unique_name if provided
             if unique_name:
                 account_info["unique_name"] = unique_name
             
@@ -183,7 +181,6 @@ async def start_all_userbots_from_db(application: Application, update_info: bool
         session_str = account.get("session_string", "")
         if not session_str: continue
         
-        # Note: This does not pass unique_name, as we are just starting existing bots
         status, _, detail = await start_userbot(session_str, application, update_info=update_info)
         if status == "success":
             success_count += 1
