@@ -101,7 +101,6 @@ async def start_userbot(
             lang_code=TD_LANG_CODE,
             system_lang_code=TD_SYSTEM_LANG_CODE,
             lang_pack=TD_LANG_PACK,
-            retry_attempts=10,
             retry_delay=5
         )
     except Exception as e:
