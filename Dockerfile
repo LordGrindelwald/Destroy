@@ -10,8 +10,10 @@ COPY requirements.txt .
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your application code into the container
-COPY main.py .
+# --- MODIFIED ---
+# Copy ALL files (main.py, config.py, utils.py, etc.)
+# from the current directory into the container's /app directory.
+COPY . .
 
 # Command to run your bot when the container starts
 CMD ["python", "main.py"]
