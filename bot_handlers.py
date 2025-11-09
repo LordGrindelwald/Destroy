@@ -77,8 +77,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
-        [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")],
-        [InlineKeyboardButton("🔄 Restart Service", callback_data="call_restart")]
+        [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -385,9 +384,9 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{name_display}\n"
             f"<b>User:</b> {username_str}\n"
             f"<b>Phone:</b> <code>{phone_str}</code>\n"
-            f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" 
-            f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
+            f"{escape_html(device_model)}"
+            f" ({escape_html(online_interval)} min)\n" 
+            f"<b>ID:</b> {user_id if user_id else 'N/A'}"
         )
         text_parts.append(entry_text)
 
@@ -438,10 +437,10 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry_text = (
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
-                f"<b>Phone:</b> <code>{phone_str}</code>\n"
-                f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n"
-                f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
+                f"<b>Phone:</b> {phone_str}\n"
+                f"{escape_html(device_model)}"
+                f"  ({escape_html(online_interval)} min)\n"
+                f"<b>ID:</b> {user_id if user_id else 'N/A'}"
             )
             text_parts.append(entry_text)
 
