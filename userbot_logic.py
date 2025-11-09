@@ -104,8 +104,7 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             workers=1,
-            # MEMORY & STABILITY FIX: Keep updates active, but limit processing thread pool
-            update_workers=10, 
+            # RESTORED: Removed invalid 'update_workers' argument
             device_model=final_device_model, 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
@@ -137,7 +136,7 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- ACQUAINTANCE LOGIC ---
+        # --- ACQUAINTANCE LOGIC (Account Safety) ---
         
         account_info = {
             "user_id": me.id, 
@@ -145,7 +144,7 @@ async def start_userbot(
             "username": me.username,
             "phone_number": me.phone_number, 
             "session_string": session_string,
-            "device_model": final_device_model, # Save the device model
+            "device_model": final_device_model, # Save the device model (Persistence fix)
         }
         if unique_name:
             account_info["unique_name"] = unique_name
