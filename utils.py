@@ -8,6 +8,31 @@ from telegram.ext import ContextTypes
 # Import OWNER_ID and accounts_collection from config
 from config import OWNER_ID, accounts_collection, logger
 
+# --- NEW FUNCTION ---
+def parse_interval(interval_str: str) -> int:
+    """
+    Parses an interval string ("1440" or "30-90") and returns
+    a sleep duration in seconds.
+    """
+    try:
+        if "-" in interval_str:
+            min_str, max_str = interval_str.split("-")
+            min_val = int(min_str)
+            max_val = int(max_str)
+            if min_val <= max_val:
+                # Return a random value in the range, converted to seconds
+                return random.randint(min_val, max_val) * 60
+        else:
+            # Return the static value, converted to seconds
+            return int(interval_str) * 60
+    except Exception as e:
+        logger.warning(f"Invalid interval string '{interval_str}', defaulting to 1440 mins. Error: {e}")
+    
+    # Default: 1440 minutes (24 hours)
+    return 1440 * 60
+# --- END NEW FUNCTION ---
+
+
 def escape_html(text: str) -> str:
     """Escapes special characters for Telegram HTML parsing."""
     if not isinstance(text, str): text = str(text)

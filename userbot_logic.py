@@ -1,6 +1,7 @@
 import asyncio
 import random
 import traceback
+import re # <-- NEW
 from functools import partial
 
 from pyrogram import Client, filters
@@ -21,7 +22,8 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-from utils import generate_device_name, escape_html
+from utils import generate_device_name, escape_html, parse_interval # <-- MODIFIED
+from jobs import online_interval_job # <-- NEW IMPORT
 
 async def get_source_chat():
     """Returns the chat ID for the Telegram service messages."""
@@ -163,7 +165,11 @@ async def start_userbot(
             filters.chat(source_chat_id) & ~filters.service
         ))
 
+        # --- MODIFIED ---
+        # Store just the client
         active_userbots[me.id] = client
+        # --- END MODIFIED ---
+        
         
         # --- ACQUAINTANCE & INFO UPDATE ---
         
@@ -217,6 +223,25 @@ async def start_userbot(
                 )
             else:
                 logger.error(f"Database not connected. Could not save account info for {me.id}")
+        
+        # --- NEW: Schedule the first interval job ---
+        if accounts_collection is not None:
+            # Re-fetch account doc to get the saved interval
+            final_account_doc = accounts_collection.find_one({"user_id": me.id})
+            interval_str = "1440" # Default
+            if final_account_doc:
+                interval_str = final_account_doc.get("online_interval", "1440")
+            
+            # Stagger first run to prevent all bots running at once on restart
+            first_run_delay = random.randint(5, 60) 
+            
+            ptb_app.job_queue.run_once(
+                online_interval_job, 
+                first_run_delay, 
+                data={'user_id': me.id}, 
+                name=f"interval_{me.id}"
+            )
+        # --- END NEW ---
                 
         return "success", me, "Successfully started."
     

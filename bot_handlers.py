@@ -1,6 +1,6 @@
 import asyncio
 import sys # Import sys for restart
-import math # <-- NEW IMPORT
+import math
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -19,17 +19,30 @@ from config import (
     OWNER_ID, accounts_collection, active_userbots, 
     paused_forwarding, paused_notifications, logger,
     UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE,
-    SELECT_ACCOUNTS, AWAIT_INTERVAL # <-- NEW IMPORTS
+    SELECT_ACCOUNTS, AWAIT_INTERVAL
 )
-from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
+# --- MODIFIED ---
+from utils import (
+    owner_only, escape_html, clean_session_string, 
+    get_account_from_arg, generate_device_name, parse_interval
+)
+# --- END MODIFIED ---
 from userbot_logic import start_userbot, start_all_userbots_from_db
-from jobs import resume_forwarding_job, resume_all_job
+from jobs import resume_forwarding_job, resume_all_job, online_interval_job # <-- MODIFIED
 from session_generator import cancel_command_conv # Re-use cancel logic
 
 # --- Constants ---
 ACCOUNTS_PER_PAGE = 16 # 8 rows * 2 columns
 
-# --- Command Handlers ---
+# --- Helper to remove jobs ---
+def _remove_interval_job(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Finds and removes the interval job for a specific user_id."""
+    job_name = f"interval_{user_id}"
+    current_jobs = context.application.job_queue.get_jobs_by_name(job_name)
+    if current_jobs:
+        for job in current_jobs:
+            job.schedule_removal()
+        logger.info(f"Removed interval job for user {user_id}.")
 
 @owner_only
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,8 +68,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send all clients a stop signal concurrently
     if active_userbots:
         logger.info(f"Stopping {len(active_userbots)} userbot clients before restart...")
+        # --- MODIFIED ---
+        # No need to manually remove jobs, as the whole application is stopping.
+        # Just stop the Pyrogram clients.
         stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
+        # --- END MODIFIED ---
         active_userbots.clear()
         
     logger.info("Triggering application shutdown.")
@@ -133,8 +150,11 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Stop client if running
         if user_id_to_delete in active_userbots:
             logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
+            # --- MODIFIED ---
             await active_userbots[user_id_to_delete].stop()
+            _remove_interval_job(context, user_id_to_delete) # Remove its job
             del active_userbots[user_id_to_delete]
+            # --- END MODIFIED ---
             
         # Delete from DB
         result = accounts_collection.delete_one({"user_id": user_id_to_delete})
@@ -285,10 +305,18 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all accounts...")
     
-    # Concurrent stop
-    stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
-    await asyncio.gather(*stop_tasks, return_exceptions=True)
+    # --- MODIFIED ---
+    if active_userbots:
+        # Stop all clients concurrently
+        stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
+        await asyncio.gather(*stop_tasks, return_exceptions=True)
+        
+        # Remove all their jobs
+        for user_id in active_userbots.keys():
+            _remove_interval_job(context, user_id)
+            
     active_userbots.clear()
+    # --- END MODIFIED ---
     
     await asyncio.sleep(2)
 
@@ -301,6 +329,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
         return
         
+    # start_all_userbots_from_db will re-schedule all jobs
     _, _, errors = await start_all_userbots_from_db(
         context.application, 
         update_info=True
@@ -353,7 +382,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_unique_name = acc.get('unique_name')
         raw_username = acc.get('username')
         raw_phone = acc.get('phone_number') # Get None if missing
-        online_interval = acc.get('online_interval', '1440') # <-- NEW
+        online_interval = acc.get('online_interval', '1440') # <-- MODIFIED
 
         # Escape only if they exist
         first_name = escape_html(raw_first_name) if raw_first_name else None
@@ -391,7 +420,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>User:</b> {username_str}\n"
             f"<b>Phone:</b> <code>{phone_str}</code>\n"
             f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
+            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- MODIFIED
             f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
         )
         text_parts.append(entry_text)
@@ -427,7 +456,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw_unique_name = acc.get('unique_name')
             raw_username = acc.get('username')
             raw_phone = acc.get('phone_number') # Get None if missing
-            online_interval = acc.get('online_interval', '1440') # <-- NEW
+            online_interval = acc.get('online_interval', '1440') # <-- MODIFIED
 
             # Escape only if they exist
             first_name = escape_html(raw_first_name) if raw_first_name else None
@@ -465,7 +494,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<b>User:</b> {username_str}\n"
                 f"<b>Phone:</b> <code>{phone_str}</code>\n"
                 f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
+                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- MODIFIED
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
@@ -495,8 +524,11 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
     
     if user_id_to_delete in active_userbots:
         logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
+        # --- MODIFIED ---
         await active_userbots[user_id_to_delete].stop()
+        _remove_interval_job(context, user_id_to_delete) # Remove its job
         del active_userbots[user_id_to_delete]
+        # --- END MODIFIED ---
         
     result = accounts_collection.delete_one({"user_id": user_id_to_delete})
     
@@ -507,6 +539,9 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
         
     await asyncio.sleep(3)
     await settings_command(update, context) 
+
+# ... (rest of bot_handlers.py remains unchanged from your previous version) ...
+# ... (all the way to the end) ...
 
 @owner_only
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
@@ -933,7 +968,22 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
         {"$set": {"online_interval": interval_to_set}}
     )
     
-    await update.message.reply_text("✅ Saved online interval settings.")
+    # --- NEW: Reschedule jobs for updated accounts ---
+    # We must reschedule the job to run *now* so it picks up the
+    # new interval for its *next* run.
+    for user_id in selected_accounts:
+        if user_id in active_userbots: # Only reschedule if bot is active
+            _remove_interval_job(context, user_id) # Remove old job
+            # Schedule new job to run almost immediately
+            context.application.job_queue.run_once(
+                online_interval_job, 
+                random.randint(1, 5), # Stagger by 1-5 seconds
+                data={'user_id': user_id}, 
+                name=f"interval_{user_id}"
+            )
+    # --- END NEW ---
+    
+    await update.message.reply_text("✅ Saved online interval settings. Active accounts will update on their next cycle.")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -961,7 +1011,20 @@ async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYP
         {"$set": {"online_interval": "1440"}} # Store default explicitly
     )
     
-    await update.message.reply_text("✅ Saved online interval settings (reset to 1440).")
+    # --- NEW: Reschedule jobs for updated accounts ---
+    for user_id in selected_accounts:
+        if user_id in active_userbots: # Only reschedule if bot is active
+            _remove_interval_job(context, user_id) # Remove old job
+            # Schedule new job to run almost immediately
+            context.application.job_queue.run_once(
+                online_interval_job, 
+                random.randint(1, 5), # Stagger by 1-5 seconds
+                data={'user_id': user_id}, 
+                name=f"interval_{user_id}"
+            )
+    # --- END NEW ---
+    
+    await update.message.reply_text("✅ Saved online interval settings (reset to 1440). Active accounts will update on their next cycle.")
     context.user_data.clear()
     return ConversationHandler.END
 

@@ -1,6 +1,76 @@
 from telegram.ext import ContextTypes
-from config import paused_forwarding, paused_notifications, OWNER_ID, logger
+from config import (
+    paused_forwarding, paused_notifications, 
+    OWNER_ID, logger, active_userbots, accounts_collection
+)
 from telegram.constants import ParseMode
+from utils import parse_interval # <-- NEW IMPORT
+import traceback # <-- NEW IMPORT
+
+# --- NEW JOB ---
+async def online_interval_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Job callback to update online status for a userbot.
+    This job schedules itself to run again based on the DB interval.
+    """
+    job_data = context.job.data
+    user_id = job_data['user_id']
+    
+    # Check if bot is still active and in our control
+    if user_id not in active_userbots:
+        logger.warning(f"Interval job: Bot {user_id} is no longer active. Stopping job.")
+        return # Do not reschedule
+        
+    client = active_userbots[user_id]
+    
+    if accounts_collection is None:
+        logger.error("Interval job: DB connection lost. Retrying in 5 mins.")
+        # Reschedule for 5 minutes later
+        context.application.job_queue.run_once(
+            online_interval_job, 
+            300, 
+            data={'user_id': user_id}, 
+            name=f"interval_{user_id}"
+        )
+        return
+
+    try:
+        # 1. Perform the "online" action
+        await client.get_me()
+        
+        # 2. Get account info to find next interval
+        account = accounts_collection.find_one({"user_id": user_id})
+        if not account:
+            logger.warning(f"Interval job: Account {user_id} not in DB. Stopping job.")
+            return # Do not reschedule
+
+        # 3. Get interval and calculate next sleep time
+        interval_str = account.get("online_interval", "1440")
+        sleep_duration_sec = parse_interval(interval_str)
+        
+        logger.info(f"Interval job: Account {user_id} updated online. Next update in {sleep_duration_sec // 60} minutes.")
+        
+        # 4. Reschedule this same job for the future
+        context.application.job_queue.run_once(
+            online_interval_job, 
+            sleep_duration_sec, 
+            data={'user_id': user_id}, 
+            name=f"interval_{user_id}"
+        )
+
+    except (AuthKeyUnregistered, UserDeactivated):
+        logger.warning(f"Interval job: Account {user_id} session is invalid. Stopping job.")
+        # Don't reschedule, the bot is dead
+    except Exception as e:
+        logger.error(f"Error in online_interval_job for {user_id}: {e}\n{traceback.format_exc()}")
+        # Reschedule for 5 minutes later on unknown error
+        context.application.job_queue.run_once(
+            online_interval_job, 
+            300, 
+            data={'user_id': user_id}, 
+            name=f"interval_{user_id}"
+        )
+# --- END NEW JOB ---
 
 async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback to resume OTP processing for a single user."""
