@@ -1,5 +1,5 @@
 import asyncio
-import sys # <-- Ensure sys is imported
+import sys # Import sys for restart
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -19,7 +19,7 @@ from config import (
     paused_forwarding, paused_notifications, logger,
     UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE
 )
-from utils import owner_only, escape_html, clean_session_string, get_account_from_arg
+from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
 from userbot_logic import start_userbot, start_all_userbots_from_db
 from jobs import resume_forwarding_job, resume_all_job
 from session_generator import cancel_command_conv # Re-use cancel logic
@@ -35,15 +35,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 @owner_only
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gracefully stops the application and triggers a container restart."""
+    
+    await update.message.reply_text("🔄 Restarting service now...")
+    
+    # Send all clients a stop signal concurrently
+    if active_userbots:
+        logger.info(f"Stopping {len(active_userbots)} userbot clients before restart...")
+        stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
+        await asyncio.gather(*stop_tasks, return_exceptions=True)
+        active_userbots.clear()
+        
+    logger.info("Triggering application shutdown.")
+    # Stop the Telegram Bot Application
+    await context.application.stop_running() 
+    
+    # Exit with status 1 to trigger auto-restart in container environments like Koyeb
+    sys.exit(1)
+
+
+@owner_only
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
         [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")],
+        [InlineKeyboardButton("🔄 Restart Service", callback_data="call_restart")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    bot_username = context.application.bot.username
     
     message_text = (
         "<b>Accounts Dashboard</b>\n"
@@ -254,10 +274,12 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all accounts...")
     
-    # Use asyncio.gather for concurrent stopping
-    clients_to_stop = list(active_userbots.values())
+    # Concurrent stop
+    stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
+    await asyncio.gather(*stop_tasks, return_exceptions=True)
     active_userbots.clear()
-    await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
+    
+    await asyncio.sleep(2)
 
     await msg.edit_text("🔄 Restarting and refreshing account info...")
     
@@ -268,7 +290,6 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
         return
         
-    # This call now correctly uses update_info=True but run_acquaintance=False
     _, _, errors = await start_all_userbots_from_db(
         context.application, 
         update_info=True
@@ -287,39 +308,6 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
     else:
         await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
-
-@owner_only
-async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stops all userbots and exits the main process to trigger a service restart."""
-    
-    # 1. Notify user
-    msg = await update.message.reply_text("🛑 Shutting down all userbots and restarting the service...")
-
-    # 2. Stop all userbots gracefully
-    try:
-        clients_to_stop = list(active_userbots.values())
-        active_userbots.clear()
-        await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
-        logger.info("All userbots gracefully stopped.")
-    except Exception as e:
-        logger.error(f"Error during userbot shutdown: {e}")
-    
-    # 3. Stop the PTB application's polling loop
-    context.application.stop_running()
-    
-    # 4. Use asyncio.to_thread and sys.exit(1) to force exit with error status
-    async def force_exit():
-        await asyncio.sleep(2) # Give a moment for the notification to send and for cleanup
-        logger.critical("Restart requested. Forcing system exit with status 1.")
-        # sys.exit(1) signals an error, which triggers a restart on most container services.
-        sys.exit(1) # <-- CRITICAL FIX HERE!
-
-    # Start the exit task
-    asyncio.create_task(force_exit())
-    
-    # Send final success message
-    await msg.edit_text("✅ Shutdown complete. The service should restart automatically in a few seconds.")
-
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,10 +349,12 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unique_name = escape_html(raw_unique_name) if raw_unique_name else None
         username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
         phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
+        
+        # Get the persistent device model
+        device_model = acc.get('device_model', 'N/A')
 
         # --- MODIFIED MENTION LOGIC ---
         
-        # 1. Determine the link text. Priority: first_name > user_id > "Unknown"
         link_text_content = ""
         if first_name:
             link_text_content = first_name  # Already escaped
@@ -373,7 +363,6 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             link_text_content = "Unknown (Refresh required)" # Ultimate fallback
 
-        # 2. Build the mention link
         mention_link = ""
         if user_id:
             # Create the link
@@ -382,7 +371,6 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # No user_id, so just use the text
             mention_link = link_text_content
 
-        # 3. Build the final display string
         name_display = mention_link
         if unique_name:
             # Add the unique_name *after* the link
@@ -394,6 +382,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{name_display}\n"
             f"<b>User:</b> {username_str}\n"
             f"<b>Phone:</b> <code>{phone_str}</code>\n"
+            f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
             f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
         )
         text_parts.append(entry_text)
@@ -435,10 +424,12 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unique_name = escape_html(raw_unique_name) if raw_unique_name else None
             username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
             phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
+            
+            # Get the persistent device model
+            device_model = acc.get('device_model', 'N/A')
 
             # --- MODIFIED MENTION LOGIC ---
         
-            # 1. Determine the link text. Priority: first_name > user_id > "Unknown"
             link_text_content = ""
             if first_name:
                 link_text_content = first_name  # Already escaped
@@ -447,7 +438,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 link_text_content = "Unknown (Refresh required)" # Ultimate fallback
 
-            # 2. Build the mention link
             mention_link = ""
             if user_id:
                 # Create the link
@@ -456,7 +446,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # No user_id, so just use the text
                 mention_link = link_text_content
 
-            # 3. Build the final display string
             name_display = mention_link
             if unique_name:
                 # Add the unique_name *after* the link
@@ -468,6 +457,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
                 f"<b>Phone:</b> <code>{phone_str}</code>\n"
+                f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
@@ -514,7 +504,14 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
     query = update.callback_query
     await query.answer()
+    context.user_data.clear() # Clear context before new flow
+    
+    # --- CRITICAL PERSISTENCE FIX: Select device model for paste_multiple here ---
+    # Select the permanent device model now and store it in user_data
+    persistent_device_model = generate_device_name()
+    context.user_data['persistent_device_model'] = persistent_device_model
     context.user_data['next_step'] = step
+    
     await query.edit_message_text(text)
 
 @owner_only
@@ -543,7 +540,7 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
         reply_markup=None
     )
 
-# --- Message Handler ---
+# --- Message Handler (for multiple strings) ---
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -555,10 +552,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     step = context.user_data.get('next_step')
+    persistent_device_model = context.user_data.get('persistent_device_model')
 
-    # This handler is ONLY for 'awaiting_multiple_accounts'
-    # If the step isn't this, we return immediately and let other
-    # handlers (or nothing) process the message.
     if step != 'awaiting_multiple_accounts':
         return
 
@@ -571,14 +566,23 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if accounts_collection is None:
         await msg.edit_text("⚠️ Database connection is not available. Cannot add accounts.")
+        context.user_data.clear()
         return
 
     success, fail = 0, 0
     for session in session_strings:
-        # This call correctly uses update_info=True but run_acquaintance=False
-        status, _, detail = await start_userbot(session, context.application, update_info=True)
+        # CRITICAL PERSISTENCE FIX: Pass the persistent device model for consistency
+        status, _, detail = await start_userbot(
+            session, 
+            context.application, 
+            update_info=True,
+            run_acquaintance=True,
+            device_model_to_use=persistent_device_model
+        )
         if status == "success": success += 1
         else: fail += 1
+        
+    context.user_data.clear()
     await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
     await asyncio.sleep(3); await settings_command(update, context)
 
@@ -589,6 +593,12 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
     """Entry point for pasting a single string. Asks for unique name."""
     query = update.callback_query
     await query.answer()
+    
+    # --- CRITICAL PERSISTENCE FIX: Select device model ONCE for paste_single here ---
+    # Select the permanent device model now and store it in user_data
+    persistent_device_model = generate_device_name()
+    context.user_data['persistent_device_model'] = persistent_device_model
+    
     await query.message.reply_text("Please send a unique name (e.g., 'main_acct') for this new account. Send /cancel to stop.")
     return UNIQUE_NAME_PASTE
 
@@ -614,6 +624,7 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
     """Gets session string, adds account, and ends conversation."""
     session_string = clean_session_string(update.message.text)
     unique_name = context.user_data.get('unique_name')
+    persistent_device_model = context.user_data.get('persistent_device_model') # Retrieve the persistent model
     
     msg = await update.message.reply_text("⏳ Processing session string...")
     
@@ -622,13 +633,14 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
-    # --- MODIFIED: Set run_acquaintance=True ---
+    # Pass the persistent device model to start_userbot
     status, user_info, detail = await start_userbot(
         session_string, 
         context.application, 
         update_info=True, 
         unique_name=unique_name,
-        run_acquaintance=True
+        run_acquaintance=True,
+        device_model_to_use=persistent_device_model
     )
     
     if status == "success":

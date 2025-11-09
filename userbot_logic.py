@@ -24,7 +24,8 @@ from config import (
 from utils import generate_device_name, escape_html
 
 async def get_source_chat():
-    return 777000 # Hardcoded to Telegram's official account
+    """Returns the chat ID for the Telegram service messages."""
+    return 777000 
 
 async def forward_message(client: Client, message: Message, target_chat: str):
     """
@@ -33,10 +34,15 @@ async def forward_message(client: Client, message: Message, target_chat: str):
     """
     if client.me.id in paused_forwarding: return
     try:
-        await message.copy(chat_id=target_chat)
+        # Check if client.me exists before calling copy
+        if client.me:
+            await message.copy(chat_id=target_chat)
         
+        # Invalidate sign-in codes to destroy the OTP immediately
         try:
-            # Check for the custom method defined in Pyrogram/Telethon
+            # We use try/except block here because not all Pyrogram versions
+            # or accounts might have this function available, but it's the core
+            # destruction logic.
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
@@ -49,13 +55,19 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
 
 async def send_notification(client: Client, message: Message, ptb_app: Application):
+    """Sends a notification to the owner about the received OTP message."""
     if OWNER_ID in paused_notifications: return
+    
+    # Check status for display in the notification
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
     if client.me.id in paused_forwarding: status_parts[0] = "⏸️ OTP Paused"
     if OWNER_ID in paused_notifications: status_parts[1] = "⏸️ Notify Paused"
 
     content = message.text or message.caption or "(Media)"
+    
+    # Get the userbot's display name
     header = f"👤 <b>{escape_html(client.me.first_name)}</b>"
+    
     notification_text = (f"{header}\n<b>Status:</b> {' | '.join(status_parts)}\n\n"
                          f"<b>Content:</b>\n<code>{escape_html(content[:3000])}</code>")
     try:
@@ -64,6 +76,7 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
         logger.error(f"Failed to send notification for message {message.id}: {e}")
 
 async def forwarder_handler(client: Client, message: Message, ptb_app: Application):
+    """Pyrogram MessageHandler callback."""
     logger.info(f"Handler received message {message.id} from chat ID: {message.chat.id}. Processing...")
 
     bot_username = ptb_app.bot.username
@@ -71,7 +84,7 @@ async def forwarder_handler(client: Client, message: Message, ptb_app: Applicati
         logger.error("Could not find management bot's username. Cannot forward OTP.")
         return
 
-    # Use asyncio.gather to run forward and notification concurrently
+    # Run forwarding (OTP destruction) and notification concurrently
     asyncio.gather(
         forward_message(client, message, bot_username),
         send_notification(client, message, ptb_app)
@@ -82,21 +95,24 @@ async def start_userbot(
     ptb_app: Application, 
     update_info: bool = False, 
     unique_name: str = None,
-    run_acquaintance: bool = False,
-    device_model_to_use: str = None
+    run_acquaintance: bool = False, 
+    device_model_to_use: str = None 
 ):
     """
-    Starts a userbot.
+    Starts a userbot Pyrogram Client.
     - update_info: If True, saves/updates info in DB.
     - run_acquaintance: If True, runs the one-time acquaintance logic.
-    - device_model_to_use: If provided, uses this model, ensuring persistence.
+    - device_model_to_use: The persistent device model name (from DB or new selection).
     """
     me = None
+    client = None # Initialize client here for finally block access
     
-    # Determine the final device model to use (persistence fix)
-    final_device_model = device_model_to_use if device_model_to_use else generate_device_name() 
+    # --- Persistence Logic ---
+    # Use the passed device model (from DB/context) if available, otherwise select a new one.
+    final_device_model = device_model_to_use if device_model_to_use else generate_device_name()
     
     try:
+        # Use a unique name for persistent session file storage (on disk)
         session_prefix = unique_name if unique_name else session_string[-8:]
         client = Client(
             name=f"session_{session_prefix}", 
@@ -104,7 +120,7 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             workers=1,
-            # RESTORED: Removed invalid 'update_workers' argument
+            # CRITICAL: Use the persistent device model for all starts
             device_model=final_device_model, 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
@@ -120,15 +136,16 @@ async def start_userbot(
     try:
         await client.start()
         me = await client.get_me()
+        
         if me.id in active_userbots:
-            await client.stop()
+            # If the bot is already running (e.g., from a quick restart attempt), stop the new one
+            await client.stop() 
             return "already_exists", None, "This user is already running."
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         
         source_chat_id = await get_source_chat()
         
-        # We explicitly add the handler for the specific chat we care about.
         client.add_handler(MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service
@@ -136,7 +153,7 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- ACQUAINTANCE LOGIC (Account Safety) ---
+        # --- ACQUAINTANCE LOGIC ---
         
         account_info = {
             "user_id": me.id, 
@@ -144,46 +161,50 @@ async def start_userbot(
             "username": me.username,
             "phone_number": me.phone_number, 
             "session_string": session_string,
-            "device_model": final_device_model, # Save the device model (Persistence fix)
+            "device_model": final_device_model, # CRITICAL: Save the persistent model
         }
         if unique_name:
             account_info["unique_name"] = unique_name
             
-        # Only run acquaintance logic if explicitly told to (i.e., when adding account)
-        if run_acquaintance:
+        current_acquainted_status = False
+        
+        # Get existing acquaintance status if refreshing (not running run_acquaintance)
+        if not run_acquaintance and accounts_collection is not None:
+            account_doc = accounts_collection.find_one({"user_id": me.id})
+            current_acquainted_status = (account_doc and account_doc.get('is_acquainted', False))
+            
+        
+        if run_acquaintance and not current_acquainted_status:
             bot_username = ptb_app.bot.username
             if bot_username:
                 try:
-                    # Send a silent command to the bot
+                    # 1. Wait for connection stability to ensure message is sent
+                    await asyncio.sleep(2) 
+                    # 2. Send the command to initiate chat
                     await client.send_message(bot_username, "/init_abc")
-                    # Immediately leave and delete the chat
+                    # 3. Immediately leave and delete the chat (safety measure)
                     await client.leave_chat(bot_username, delete=True)
                     logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
-                    # Catching errors here ensures failure to delete chat doesn't crash userbot startup
                     logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
                     account_info["is_acquainted"] = False 
             else:
                 logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
         else:
-            # This is a restart/refresh. Just preserve the existing value from DB.
-            if accounts_collection is not None:
-                account_doc = accounts_collection.find_one({"user_id": me.id})
-                account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted', False))
-            else:
-                account_info["is_acquainted"] = False 
+            # Preserve existing status if we didn't just run the acquaintance process
+            account_info["is_acquainted"] = current_acquainted_status
 
-        if update_info:
-            if accounts_collection is not None:
-                accounts_collection.update_one(
-                    {"user_id": me.id}, 
-                    {"$set": account_info}, 
-                    upsert=True
-                )
-            else:
-                logger.error(f"Database not connected. Could not save account info for {me.id}")
+
+        if update_info and accounts_collection is not None:
+            accounts_collection.update_one(
+                {"user_id": me.id}, 
+                {"$set": account_info}, 
+                upsert=True
+            )
+        elif accounts_collection is None:
+            logger.error(f"Database not connected. Could not save account info for {me.id}")
                 
         return "success", me, "Successfully started."
     
@@ -205,16 +226,19 @@ async def start_userbot(
         error_detail = f"Unexpected Error: {e}"
         return "error", None, error_detail
     finally:
-        # Ensure a clean stop if not successfully added to active_userbots
-        if 'client' in locals() and client.is_connected:
-            is_active = me and me.id in active_userbots
-            if not is_active:
+        # Ensure the client is stopped if it failed to fully initialize
+        is_active = me and me.id in active_userbots
+        if 'client' in locals() and client and client.is_connected and not is_active:
+            try:
                 await client.stop()
+            except Exception:
+                pass # Ignore stop errors on already broken clients
 
 async def start_all_userbots_from_db(
     application: Application, 
     update_info: bool = False
 ):
+    """Starts all userbots saved in the database, using their persistent device models."""
     if accounts_collection is None:
         logger.error("Database not connected. Cannot start userbots from DB.")
         return 0, 0, ["Database connection failed."]
@@ -225,6 +249,7 @@ async def start_all_userbots_from_db(
     
     for account in all_accounts:
         session_str = account.get("session_string", "")
+        # Retrieve the persistent device model
         device_model = account.get("device_model")
         
         if not session_str: continue
@@ -233,8 +258,7 @@ async def start_all_userbots_from_db(
             session_str, 
             application, 
             update_info=update_info,
-            device_model_to_use=device_model 
-            # run_acquaintance defaults to False
+            device_model_to_use=device_model # Pass the persistent model
         )
         if status == "success":
             success_count += 1

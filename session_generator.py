@@ -22,7 +22,7 @@ from config import (
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
 from utils import owner_only, generate_device_name, escape_html
-from userbot_logic import start_userbot # To add the account after generation
+from userbot_logic import start_userbot # To add the account after selection
 
 @owner_only
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -37,8 +37,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves unique name and asks for phone number."""
-    # --- MODIFIED: Force unique_name to lowercase ---
+    """Saves unique name, selects persistent device model, and asks for phone number."""
+    # Force unique_name to lowercase
     unique_name = update.message.text.strip().split()[0].lower()
     
     # Check if name is taken (now case-insensitive)
@@ -46,7 +46,12 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
         await update.message.reply_text("That name is already taken. Please choose another one.")
         return UNIQUE_NAME_GEN # Stay in this state
 
+    # --- CRITICAL PERSISTENCE FIX: Select the device model ONCE ---
+    # Select the permanent device model now and store it in user_data
+    persistent_device_model = generate_device_name()
     context.user_data['unique_name'] = unique_name
+    context.user_data['persistent_device_model'] = persistent_device_model
+    
     await update.message.reply_text("Great. Now please send the phone number in international format (e.g., +1234567890).")
     return PHONE
 
@@ -55,16 +60,17 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
-    # MODIFIED: Use unique user ID for temporary file session name
+    # Retrieve the persistent device model chosen in the previous step
+    persistent_device_model = context.user_data.get('persistent_device_model')
+    
+    # Use unique user ID for temporary file session name
     client = Client(
         name=f"temp_gen_{update.effective_user.id}", 
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
-        # REMOVED: in_memory=True
         workers=1,
-        no_updates=True,
-        # REMOVED: sleep_threshold=9999 to eliminate conflicting retry logic
-        device_model=generate_device_name(), # Use random device name
+        # CRITICAL PERSISTENCE FIX: Use the selected persistent device model
+        device_model=persistent_device_model, 
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
         lang_code=TD_LANG_CODE,
@@ -101,13 +107,16 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Signed in! Generating session and adding account...")
         session_string = await client.export_session_string()
         
-        # --- MODIFIED: Set run_acquaintance=True ---
+        # CRITICAL PERSISTENCE FIX: Pass the persistent device model to start_userbot
+        persistent_device_model = context.user_data.get('persistent_device_model')
+
         status, user_info, detail = await start_userbot(
             session_string, 
             context.application, 
             update_info=True, 
             unique_name=unique_name,
-            run_acquaintance=True
+            run_acquaintance=True,
+            device_model_to_use=persistent_device_model # Pass the model!
         )
         
         if status == "success":
@@ -116,6 +125,8 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
         
         await update.message.delete()
+        # Ensure temporary client is disconnected before clearing context
+        if client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -140,13 +151,16 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Password correct! Generating session and adding account...")
         session_string = await client.export_session_string()
         
-        # --- MODIFIED: Set run_acquaintance=True ---
+        # CRITICAL PERSISTENCE FIX: Pass the persistent device model to start_userbot
+        persistent_device_model = context.user_data.get('persistent_device_model')
+
         status, user_info, detail = await start_userbot(
             session_string, 
             context.application, 
             update_info=True, 
             unique_name=unique_name,
-            run_acquaintance=True
+            run_acquaintance=True,
+            device_model_to_use=persistent_device_model # Pass the model!
         )
         
         if status == "success":
@@ -155,6 +169,7 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
 
         await update.message.delete()
+        if client and client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
         
