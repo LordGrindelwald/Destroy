@@ -28,19 +28,40 @@ from utils import generate_device_name, escape_html
 active_online_jobs = {}
 
 async def perform_online_action(context: dict):
-    """Job callback to send/delete message."""
+    """
+    Job callback to send/delete message and manage online status.
+    This is the FIX.
+    """
     client: Client = context.job.data['client']
     if not client.is_connected:
         logger.warning(f"Client {client.me.id} not connected. Skipping online action.")
         return
 
     try:
+        # 1. Go Online
+        await client.update_status(offline=False)
+        
+        # 2. Perform Action
         msg = await client.send_message("me", f"Online action: {int(time.time())}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(1) # Short delay after message
         await msg.delete()
-        logger.info(f"Successfully performed online action for {client.me.id}")
+        
+        logger.info(f"Successfully performed online action for {client.me.id} (status: online)")
+
+        # 3. Wait for 15-30 seconds to simulate being online
+        await asyncio.sleep(random.randint(15, 30))
+        
     except Exception as e:
         logger.warning(f"Failed to perform online action for {client.me.id}: {e}")
+        # If action fails, we still want to go offline
+    
+    finally:
+        # 4. Go Offline (always runs)
+        try:
+            await client.update_status(offline=True)
+            logger.info(f"Set status to offline for {client.me.id}")
+        except Exception as e_offline:
+            logger.error(f"Failed to set offline status for {client.me.id}: {e_offline}")
 
 async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
     """Schedules the repeating online action job."""
@@ -286,6 +307,13 @@ async def start_userbot(
             final_interval_str = account_doc.get("online_interval", "1440")
             
         await schedule_online_job(client, final_interval_str, ptb_app)
+        
+        # --- NEW: Set initial status to offline ---
+        try:
+            await client.update_status(offline=True)
+            logger.info(f"Set initial status to offline for {me.id}")
+        except Exception as e:
+            logger.warning(f"Could not set initial offline status for {me.id}: {e}")
         # --- End ---
                 
         return "success", me, "Successfully started."
