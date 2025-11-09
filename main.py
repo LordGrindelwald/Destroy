@@ -23,7 +23,7 @@ from bot_handlers import (
     refresh_command, cancel_command, set_unique_name_command,
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
-    paste_single_conv, accounts_command # Import paste flow
+    paste_single_conv, accounts_command, restart_command # <-- ADDED restart_command
 )
 
 # --- MODIFIED: New dummy function for silent command ---
@@ -46,9 +46,12 @@ async def post_init_tasks(application: Application):
 async def post_shutdown_tasks(application: Application):
     """Runs before the bot application shuts down."""
     logger.info("Shutting down userbots...")
-    for client in active_userbots.values():
-        if client.is_connected:
-            await client.stop()
+    # Cleanly stop all clients registered in active_userbots
+    clients_to_stop = list(active_userbots.values())
+    active_userbots.clear()
+    
+    # Use asyncio.gather for concurrent stopping
+    await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
     
     logger.info("Shutdown complete.")
 
@@ -82,6 +85,7 @@ def main() -> None:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("restart", restart_command)) # <-- NEW
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers

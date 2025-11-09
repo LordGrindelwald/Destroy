@@ -36,6 +36,7 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         await message.copy(chat_id=target_chat)
         
         try:
+            # Check for the custom method defined in Pyrogram/Telethon
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
@@ -70,6 +71,7 @@ async def forwarder_handler(client: Client, message: Message, ptb_app: Applicati
         logger.error("Could not find management bot's username. Cannot forward OTP.")
         return
 
+    # Use asyncio.gather to run forward and notification concurrently
     asyncio.gather(
         forward_message(client, message, bot_username),
         send_notification(client, message, ptb_app)
@@ -80,26 +82,31 @@ async def start_userbot(
     ptb_app: Application, 
     update_info: bool = False, 
     unique_name: str = None,
-    run_acquaintance: bool = False # <-- NEW PARAMETER
+    run_acquaintance: bool = False,
+    device_model_to_use: str = None
 ):
     """
     Starts a userbot.
     - update_info: If True, saves/updates info in DB.
     - run_acquaintance: If True, runs the one-time acquaintance logic.
+    - device_model_to_use: If provided, uses this model, ensuring persistence.
     """
     me = None
+    
+    # Determine the final device model to use
+    final_device_model = device_model_to_use if device_model_to_use else generate_device_name()
+    
     try:
-        # MODIFIED: Use a unique name for persistent session storage
         session_prefix = unique_name if unique_name else session_string[-8:]
         client = Client(
             name=f"session_{session_prefix}", 
             api_id=TD_API_ID,
             api_hash=TD_API_HASH,
             session_string=session_string,
-            # REMOVED: in_memory=True to enable file persistence (stable session loading)
             workers=1,
-            # REMOVED: sleep_threshold=9999 to eliminate conflicting retry logic
-            device_model=generate_device_name(), 
+            # --- MEMORY FIX: Prevent receiving all unnecessary updates ---
+            no_updates=True, 
+            device_model=final_device_model, 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
             lang_code=TD_LANG_CODE,
@@ -121,7 +128,8 @@ async def start_userbot(
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         
         source_chat_id = await get_source_chat()
-        # This explicitly tells Pyrogram to handle messages again
+        
+        # We explicitly add the handler for the specific chat we care about.
         client.add_handler(MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service
@@ -129,7 +137,7 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- NEW ACQUAINTANCE LOGIC ---
+        # --- ACQUAINTANCE LOGIC ---
         
         account_info = {
             "user_id": me.id, 
@@ -137,6 +145,7 @@ async def start_userbot(
             "username": me.username,
             "phone_number": me.phone_number, 
             "session_string": session_string,
+            "device_model": final_device_model, # Save the device model
         }
         if unique_name:
             account_info["unique_name"] = unique_name
@@ -196,6 +205,7 @@ async def start_userbot(
         error_detail = f"Unexpected Error: {e}"
         return "error", None, error_detail
     finally:
+        # --- Memory Fix: Ensure a clean stop if not successfully added to active_userbots ---
         if 'client' in locals() and client.is_connected:
             is_active = me and me.id in active_userbots
             if not is_active:
@@ -215,14 +225,15 @@ async def start_all_userbots_from_db(
     
     for account in all_accounts:
         session_str = account.get("session_string", "")
+        device_model = account.get("device_model")
+        
         if not session_str: continue
         
-        # This call correctly uses run_acquaintance=False (default)
-        # so it will NOT run the acquaintance logic on restart/refresh.
         status, _, detail = await start_userbot(
             session_str, 
             application, 
-            update_info=update_info
+            update_info=update_info,
+            device_model_to_use=device_model 
             # run_acquaintance defaults to False
         )
         if status == "success":

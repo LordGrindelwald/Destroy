@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -252,12 +253,11 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all accounts...")
-    for uid, client in list(active_userbots.items()):
-        if client.is_connected:
-            await client.stop()
-    active_userbots.clear()
     
-    await asyncio.sleep(2)
+    # Use asyncio.gather for concurrent stopping
+    clients_to_stop = list(active_userbots.values())
+    active_userbots.clear()
+    await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
 
     await msg.edit_text("🔄 Restarting and refreshing account info...")
     
@@ -287,6 +287,40 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
     else:
         await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+
+@owner_only
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops all userbots and exits the main process to trigger a service restart."""
+    
+    # 1. Notify user
+    msg = await update.message.reply_text("🛑 Shutting down all userbots and restarting the service...")
+
+    # 2. Stop all userbots gracefully
+    try:
+        # Use asyncio.gather for concurrent stopping
+        clients_to_stop = list(active_userbots.values())
+        active_userbots.clear()
+        await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
+        logger.info("All userbots gracefully stopped.")
+    except Exception as e:
+        logger.error(f"Error during userbot shutdown: {e}")
+    
+    # 3. Stop the PTB application's polling loop
+    context.application.stop_running()
+    
+    # 4. Use asyncio.to_thread and sys.exit(0) to force exit after a short delay
+    async def force_exit():
+        await asyncio.sleep(2) # Give a moment for the notification to send and for cleanup
+        logger.critical("Restart requested. Forcing system exit.")
+        # sys.exit(0) signals a clean exit to the container orchestrator which will then restart the service.
+        sys.exit(0)
+
+    # Start the exit task
+    asyncio.create_task(force_exit())
+    
+    # Send final success message
+    await msg.edit_text("✅ Shutdown complete. The service should restart automatically in a few seconds.")
+
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
