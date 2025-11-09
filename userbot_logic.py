@@ -29,8 +29,8 @@ active_online_jobs = {}
 
 async def perform_online_action(context: dict):
     """
-    Job callback to send/delete message, wait 10s, then force stop/start.
-    This simulates a brief offline state by fully stopping the client.
+    Job callback to send/delete message, STOP, wait 5s, then START.
+    This ensures the client is fully offline for 5 seconds.
     """
     client: Client = context.job.data['client']
     user_id_log = client.me.id if client.me else "Unknown"
@@ -47,14 +47,14 @@ async def perform_online_action(context: dict):
         await msg.delete()
         logger.info(f"Successfully performed online action (send/delete) for {user_id_log}")
 
-        # 3. Wait 10 seconds
-        await asyncio.sleep(10)
-
-        # 4. Go Offline (fully stop client)
+        # 3. Go Offline (fully stop client)
         await client.stop()
         logger.info(f"Client {user_id_log} stopped (Offline state).")
 
-        # 5. Connect back again (re-registers handlers)
+        # 4. Wait 5 seconds WHILE offline
+        await asyncio.sleep(5)
+
+        # 5. Connect back again (re-initializes, fetches missed updates, and resumes OTP listening)
         await client.start()
         logger.info(f"Client {user_id_log} restarted (Online state).")
 
