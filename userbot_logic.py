@@ -29,39 +29,44 @@ active_online_jobs = {}
 
 async def perform_online_action(context: dict):
     """
-    Job callback to send/delete message, wait 10s, then force disconnect/reconnect.
-    This simulates a brief offline state only for the client in the job data.
+    Job callback to send/delete message, wait 10s, then force stop/start.
+    This simulates a brief offline state by fully stopping the client.
     """
     client: Client = context.job.data['client']
-    
-    # Safety check: if the client is not connected, we can't perform the action.
-    if not client.is_connected:
-        logger.warning(f"Client {client.me.id} not connected. Skipping online action.")
-        return
+    user_id_log = client.me.id if client.me else "Unknown"
 
     try:
-        # 1. Send message to saved messages ("me")
+        # 1. Check connection
+        if not client.is_connected:
+            logger.warning(f"Client {user_id_log} not connected. Attempting to start...")
+            await client.start() # Try to restart it
+            # If this fails, the exception block will catch it.
+        
+        # 2. Perform online action
         msg = await client.send_message("me", f"Online action: {int(time.time())}")
-        
-        # 2. Immediately delete it
         await msg.delete()
-        logger.info(f"Successfully performed online action (send/delete) for {client.me.id}")
-        
-        # 3. Wait 10 seconds (Simulate brief offline period)
+        logger.info(f"Successfully performed online action (send/delete) for {user_id_log}")
+
+        # 3. Wait 10 seconds
         await asyncio.sleep(10)
-        
-        # 4. Disconnect the account (Goes explicitly offline)
-        await client.disconnect()
-        logger.info(f"Client {client.me.id} disconnected (Offline state).")
-        
-        # 5. Connect back again (Comes back online)
-        await client.connect()
-        logger.info(f"Client {client.me.id} reconnected (Online state).")
-        
+
+        # 4. Go Offline (fully stop client)
+        await client.stop()
+        logger.info(f"Client {user_id_log} stopped (Offline state).")
+
+        # 5. Connect back again (re-registers handlers)
+        await client.start()
+        logger.info(f"Client {user_id_log} restarted (Online state).")
+
     except Exception as e:
-        user_id = client.me.id if client.me else "Unknown" 
-        logger.warning(f"Failed to perform online action (disconnect/reconnect) for {user_id}: {e}")
-        # Allow the job queue to attempt the action again in the next interval.
+        logger.warning(f"Failed to perform online action cycle for {user_id_log}: {e}")
+        # Ensure client is running for next time, if possible
+        if not client.is_connected:
+            try:
+                logger.info(f"Attempting recovery restart for {user_id_log} after error...")
+                await client.start()
+            except Exception as e2:
+                logger.error(f"Recovery restart failed for {user_id_log}: {e2}")
 
 
 async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
