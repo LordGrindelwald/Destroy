@@ -1,5 +1,6 @@
 import asyncio
 import sys # Import sys for restart
+import math # <-- NEW IMPORT
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -17,12 +18,16 @@ from telegram.constants import ParseMode
 from config import (
     OWNER_ID, accounts_collection, active_userbots, 
     paused_forwarding, paused_notifications, logger,
-    UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE
+    UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE,
+    SELECT_ACCOUNTS, AWAIT_INTERVAL # <-- NEW IMPORTS
 )
 from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
 from userbot_logic import start_userbot, start_all_userbots_from_db
 from jobs import resume_forwarding_job, resume_all_job
 from session_generator import cancel_command_conv # Re-use cancel logic
+
+# --- Constants ---
+ACCOUNTS_PER_PAGE = 16 # 8 rows * 2 columns
 
 # --- Command Handlers ---
 
@@ -38,7 +43,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gracefully stops the application and triggers a container restart (exit code 1)."""
     
-    await update.message.reply_text("🔄 Restarting service now...")
+    # Handle both command and callback query
+    if update.callback_query:
+        await update.callback_query.answer("Restarting...")
+        message_context = update.callback_query.message
+    else:
+        message_context = update.message
+        
+    await message_context.reply_text("🔄 Restarting service now...")
     
     # Send all clients a stop signal concurrently
     if active_userbots:
@@ -341,6 +353,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_unique_name = acc.get('unique_name')
         raw_username = acc.get('username')
         raw_phone = acc.get('phone_number') # Get None if missing
+        online_interval = acc.get('online_interval', '1440') # <-- NEW
 
         # Escape only if they exist
         first_name = escape_html(raw_first_name) if raw_first_name else None
@@ -378,6 +391,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>User:</b> {username_str}\n"
             f"<b>Phone:</b> <code>{phone_str}</code>\n"
             f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
+            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
             f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
         )
         text_parts.append(entry_text)
@@ -413,6 +427,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw_unique_name = acc.get('unique_name')
             raw_username = acc.get('username')
             raw_phone = acc.get('phone_number') # Get None if missing
+            online_interval = acc.get('online_interval', '1440') # <-- NEW
 
             # Escape only if they exist
             first_name = escape_html(raw_first_name) if raw_first_name else None
@@ -450,6 +465,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<b>User:</b> {username_str}\n"
                 f"<b>Phone:</b> <code>{phone_str}</code>\n"
                 f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
+                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
@@ -650,4 +666,335 @@ paste_single_conv = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel_command_conv)],
     conversation_timeout=300,
+)
+
+
+# --- NEW: Online Interval Flow ---
+
+@owner_only
+async def online_interval_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 1) Sends the initial /online_interval command response.
+    """
+    keyboard = [[InlineKeyboardButton("OnlineInterval settings ⌚️⚙️", callback_data="oi_start_selection")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_html(
+        "Click the button to select the account(s) for changing online interval.",
+        reply_markup=reply_markup
+    )
+
+async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Images 2, 3, 4) Draws the paginated multi-select account menu.
+    This is the core of the new feature.
+    """
+    query = update.callback_query
+    
+    # Get data from user_data
+    all_account_ids = context.user_data.get('all_account_ids', [])
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    current_page = context.user_data.get('current_page', 0)
+    
+    if not all_account_ids:
+        if query:
+            await query.answer("Error: Account list not found. Please try /online_interval again.", show_alert=True)
+        return ConversationHandler.END
+
+    total_accounts = len(all_account_ids)
+    total_pages = math.ceil(total_accounts / ACCOUNTS_PER_PAGE)
+    
+    # Get account details for the current page
+    start_index = current_page * ACCOUNTS_PER_PAGE
+    end_index = start_index + ACCOUNTS_PER_PAGE
+    page_account_ids = all_account_ids[start_index:end_index]
+    
+    # Fetch full docs for this page to get names and intervals
+    page_accounts = []
+    if accounts_collection is not None:
+        page_accounts = list(accounts_collection.find(
+            {"user_id": {"$in": page_account_ids}},
+            {"first_name": 1, "user_id": 1, "unique_name": 1, "online_interval": 1}
+        ))
+    
+    # Sort them to match the order in page_account_ids (MongoDB doesn't guarantee order)
+    account_map = {acc['user_id']: acc for acc in page_accounts}
+    sorted_page_accounts = [account_map[uid] for uid in page_account_ids if uid in account_map]
+
+    keyboard = []
+    
+    # --- Top Control Buttons ---
+    control_row1 = [
+        InlineKeyboardButton(f"Select all ({total_accounts}) 🗂️", callback_data="oi_select_all"),
+        InlineKeyboardButton(f"Unselect all ({len(selected_accounts)}) 🗑️", callback_data="oi_unselect_all"),
+    ]
+    control_row2 = [
+        InlineKeyboardButton("Select page 📖", callback_data="oi_select_page"),
+        InlineKeyboardButton("Unselect page ❌", callback_data="oi_unselect_page"),
+    ]
+    keyboard.append(control_row1)
+    keyboard.append(control_row2)
+
+    # --- Account Buttons ---
+    account_buttons = []
+    for acc in sorted_page_accounts:
+        user_id = acc['user_id']
+        name = escape_html(acc.get('first_name', acc.get('unique_name', str(user_id))))
+        interval = acc.get('online_interval', '1440') # Default 1440
+        
+        is_selected = user_id in selected_accounts
+        
+        prefix = "✅" if is_selected else "✳️"
+        button_text = f"{prefix} {name} ({interval}m)"
+        callback = f"oi_toggle_{user_id}"
+        
+        account_buttons.append(InlineKeyboardButton(button_text, callback_data=callback))
+
+    # Arrange account buttons in 2 columns
+    for i in range(0, len(account_buttons), 2):
+        keyboard.append(account_buttons[i:i+2])
+        
+    # --- Done Button ---
+    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="oi_done")])
+
+    # --- Pagination Buttons ---
+    page_buttons = []
+    if current_page > 0:
+        page_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data="oi_prev_page"))
+        
+    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="oi_noop")) # No-op button
+
+    if current_page < total_pages - 1:
+        page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="oi_next_page"))
+        
+    keyboard.append(page_buttons)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # --- Final Message Text ---
+    message_text = (
+        f"<b>Account selection [multi]</b>\n"
+        f"Page: {current_page + 1} / {total_pages}\n"
+        f"Selected: {len(selected_accounts)} / {total_accounts}"
+    )
+    
+    if query:
+        try:
+            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        except Exception as e:
+            logger.warning(f"Error editing message in draw_account_selection_menu: {e}")
+    return SELECT_ACCOUNTS
+
+
+@owner_only
+async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 2) Entry point for the ConversationHandler.
+    Fetches all accounts, sets up user_data, and draws the menu.
+    """
+    query = update.callback_query
+    await query.answer()
+    
+    if accounts_collection is None:
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
+        return ConversationHandler.END
+
+    # Fetch ALL account user_ids once and store them
+    all_accounts = list(accounts_collection.find({}, {"user_id": 1}))
+    if not all_accounts:
+        await query.edit_message_text("There are no accounts to configure. Please /add one first.")
+        return ConversationHandler.END
+        
+    all_account_ids = [acc['user_id'] for acc in all_accounts]
+    
+    context.user_data.clear()
+    context.user_data['all_account_ids'] = all_account_ids
+    context.user_data['selected_accounts'] = set() # Start with empty selection
+    context.user_data['current_page'] = 0
+    
+    return await draw_account_selection_menu(update, context)
+
+
+@owner_only
+async def handle_account_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 3) Handles all button presses within the account selection menu.
+    """
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    all_account_ids = context.user_data.get('all_account_ids', [])
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    current_page = context.user_data.get('current_page', 0)
+    
+    if data.startswith("oi_toggle_"):
+        user_id = int(data.split("_")[2])
+        if user_id in selected_accounts:
+            selected_accounts.discard(user_id)
+        else:
+            selected_accounts.add(user_id)
+            
+    elif data == "oi_select_all":
+        selected_accounts.update(all_account_ids)
+        
+    elif data == "oi_unselect_all":
+        selected_accounts.clear()
+
+    elif data == "oi_select_page":
+        start_index = current_page * ACCOUNTS_PER_PAGE
+        end_index = start_index + ACCOUNTS_PER_PAGE
+        page_account_ids = all_account_ids[start_index:end_index]
+        selected_accounts.update(page_account_ids)
+        
+    elif data == "oi_unselect_page":
+        start_index = current_page * ACCOUNTS_PER_PAGE
+        end_index = start_index + ACCOUNTS_PER_PAGE
+        page_account_ids = set(all_account_ids[start_index:end_index])
+        selected_accounts.difference_update(page_account_ids)
+
+    elif data == "oi_next_page":
+        total_pages = math.ceil(len(all_account_ids) / ACCOUNTS_PER_PAGE)
+        if current_page < total_pages - 1:
+            context.user_data['current_page'] = current_page + 1
+            
+    elif data == "oi_prev_page":
+        if current_page > 0:
+            context.user_data['current_page'] = current_page - 1
+            
+    elif data == "oi_noop":
+        return SELECT_ACCOUNTS # Do nothing, just refresh
+        
+    elif data == "oi_done":
+        if not selected_accounts:
+            await query.answer("⚠️ Please select at least one account.", show_alert=True)
+            return SELECT_ACCOUNTS # Stay in this state
+        
+        # (Step 5) Transition to next step
+        await query.edit_message_text(
+            "💭 Send the new interval now (in minutes, max. 1440; 24 hours)\n\n"
+            "ℹ️ You can send minutes like this: <code>1-140</code> to make me set a random number "
+            "in the range, e.g. from 1 to 140 minutes.\n\n"
+            "If you want to reset the value to default (1440; 24 hours), send /default.",
+            parse_mode=ParseMode.HTML
+        )
+        return AWAIT_INTERVAL
+
+    # Save changes and redraw
+    context.user_data['selected_accounts'] = selected_accounts
+    return await draw_account_selection_menu(update, context)
+
+
+@owner_only
+async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Step 6) Handles the text input for the interval.
+    """
+    user_input = update.message.text.strip()
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if not selected_accounts:
+        await update.message.reply_text("⚠️ No accounts were selected. Action cancelled.")
+        context.user_data.clear()
+        return ConversationHandler.END
+        
+    # --- Validate Input ---
+    interval_to_set = None
+    if "-" in user_input:
+        parts = user_input.split("-")
+        if len(parts) == 2:
+            try:
+                min_val = int(parts[0])
+                max_val = int(parts[1])
+                if 0 < min_val <= max_val <= 1440:
+                    interval_to_set = f"{min_val}-{max_val}"
+            except ValueError:
+                pass # Will fail validation
+    else:
+        try:
+            val = int(user_input)
+            if 0 < val <= 1440:
+                interval_to_set = str(val)
+        except ValueError:
+            pass # Will fail validation
+
+    if interval_to_set is None:
+        await update.message.reply_text("Invalid format. Please send a number (e.g., 60) or a range (e.g., 30-90) between 1 and 1440.")
+        return AWAIT_INTERVAL # Stay in this state
+
+    # --- Update Database ---
+    accounts_collection.update_many(
+        {"user_id": {"$in": list(selected_accounts)}},
+        {"$set": {"online_interval": interval_to_set}}
+    )
+    
+    await update.message.reply_text("✅ Saved online interval settings.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+@owner_only
+async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Step 6, default) Handles /default command for interval.
+    """
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if not selected_accounts:
+        await update.message.reply_text("⚠️ No accounts were selected. Action cancelled.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # Set to 1440 (the default)
+    accounts_collection.update_many(
+        {"user_id": {"$in": list(selected_accounts)}},
+        {"$set": {"online_interval": "1440"}} # Store default explicitly
+    )
+    
+    await update.message.reply_text("✅ Saved online interval settings (reset to 1440).")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+@owner_only
+async def cancel_interval_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the interval selection conversation."""
+    context.user_data.clear()
+    message = update.message or update.callback_query.message
+    await message.reply_text("Action cancelled.")
+    
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text("Action cancelled.")
+        except Exception:
+            pass # Ignore if message can't be edited
+            
+    return ConversationHandler.END
+
+
+# --- Define the ConversationHandler ---
+online_interval_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(online_interval_menu, pattern="^oi_start_selection$")],
+    states={
+        SELECT_ACCOUNTS: [CallbackQueryHandler(handle_account_selection_callback, pattern=r"^oi_")],
+        AWAIT_INTERVAL: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input),
+            CommandHandler("default", set_interval_default)
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel_interval_conv),
+        CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$") # General cancel
+    ],
+    conversation_timeout=600, # 10 minutes
 )

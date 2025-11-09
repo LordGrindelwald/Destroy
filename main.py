@@ -1,4 +1,5 @@
 import asyncio
+import math # <-- NEW IMPORT
 from functools import partial
 from telegram import Update
 from telegram.ext import (
@@ -23,7 +24,8 @@ from bot_handlers import (
     refresh_command, cancel_command, set_unique_name_command,
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
-    paste_single_conv, accounts_command, restart_command # Import restart
+    paste_single_conv, accounts_command, restart_command,
+    online_interval_start, online_interval_conv # <-- NEW IMPORTS
 )
 
 # --- New dummy function for silent command ---
@@ -69,6 +71,7 @@ def main() -> None:
     # 1. Conversation Handlers
     application.add_handler(gen_conv, group=0)
     application.add_handler(paste_single_conv, group=0)
+    application.add_handler(online_interval_conv, group=0) # <-- NEW
 
     # 2. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -84,6 +87,7 @@ def main() -> None:
     application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("restart", restart_command)) # NEW
+    application.add_handler(CommandHandler("online_interval", online_interval_start)) # <-- NEW
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers

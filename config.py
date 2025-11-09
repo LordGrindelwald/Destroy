@@ -55,3 +55,6 @@ UNIQUE_NAME_GEN, PHONE, CODE, PASSWORD = range(4)
 
 # Paste String
 UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE = range(4, 6)
+
+# Online Interval
+SELECT_ACCOUNTS, AWAIT_INTERVAL = range(6, 8)
