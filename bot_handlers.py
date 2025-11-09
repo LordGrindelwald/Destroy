@@ -1,6 +1,6 @@
 import asyncio
 import sys # Import sys for restart
-import math # <-- NEW IMPORT
+import math 
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -19,10 +19,13 @@ from config import (
     OWNER_ID, accounts_collection, active_userbots, 
     paused_forwarding, paused_notifications, logger,
     UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE,
-    SELECT_ACCOUNTS, AWAIT_INTERVAL # <-- NEW IMPORTS
+    AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL # <-- NEW STATES
 )
 from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
-from userbot_logic import start_userbot, start_all_userbots_from_db
+from userbot_logic import (
+    start_userbot, start_all_userbots_from_db,
+    stop_online_job, schedule_online_job, active_online_jobs # <-- NEW IMPORTS
+)
 from jobs import resume_forwarding_job, resume_all_job
 from session_generator import cancel_command_conv # Re-use cancel logic
 
@@ -43,7 +46,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gracefully stops the application and triggers a container restart (exit code 1)."""
     
-    # Handle both command and callback query
     if update.callback_query:
         await update.callback_query.answer("Restarting...")
         message_context = update.callback_query.message
@@ -52,7 +54,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await message_context.reply_text("🔄 Restarting service now...")
     
-    # Send all clients a stop signal concurrently
+    # --- NEW: Stop all running jobs ---
+    logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
+    for user_id in list(active_online_jobs.keys()):
+        stop_online_job(user_id)
+    # --- End ---
+    
     if active_userbots:
         logger.info(f"Stopping {len(active_userbots)} userbot clients before restart...")
         stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
@@ -60,10 +67,8 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_userbots.clear()
         
     logger.info("Triggering application shutdown.")
-    # Stop the Telegram Bot Application
     await context.application.stop_running() 
     
-    # CRITICAL FIX: Exit with status 1 to trigger auto-restart in container environments
     sys.exit(1)
 
 
@@ -130,13 +135,15 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_id_to_delete = account['user_id']
         
-        # Stop client if running
+        # --- NEW: Stop online job ---
+        stop_online_job(user_id_to_delete)
+        # --- End ---
+        
         if user_id_to_delete in active_userbots:
             logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
             await active_userbots[user_id_to_delete].stop()
             del active_userbots[user_id_to_delete]
             
-        # Delete from DB
         result = accounts_collection.delete_one({"user_id": user_id_to_delete})
         
         if result.deleted_count > 0:
@@ -212,10 +219,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_bots = accounts_collection.count_documents({})
         
     running_bots = len(active_userbots)
+    running_jobs = len(active_online_jobs)
     
     status_text = (f"<b>Bot Status</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
                    f"<b>Accounts Active:</b> {running_bots}/{total_bots}\n"
+                   f"<b>Online Jobs Active:</b> {running_jobs}\n" # <-- NEW
                    f"<b>Paused OTP Destruction:</b> {len(paused_forwarding)} bots\n"
                    f"<b>Paused OTP Forwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
@@ -285,7 +294,12 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔄 Stopping all accounts...")
     
-    # Concurrent stop
+    # --- NEW: Stop all running jobs ---
+    logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
+    for user_id in list(active_online_jobs.keys()):
+        stop_online_job(user_id)
+    # --- End ---
+    
     stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
     await asyncio.gather(*stop_tasks, return_exceptions=True)
     active_userbots.clear()
@@ -348,57 +362,37 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for acc in accounts:
         user_id = acc.get('user_id')
         
-        # Get raw values first
         raw_first_name = acc.get('first_name')
         raw_unique_name = acc.get('unique_name')
         raw_username = acc.get('username')
-        raw_phone = acc.get('phone_number') # Get None if missing
-        online_interval = acc.get('online_interval', '1440') # <-- NEW
+        raw_phone = acc.get('phone_number') 
+        online_interval = acc.get('online_interval', '1440') 
 
-        # Escape only if they exist
         first_name = escape_html(raw_first_name) if raw_first_name else None
         unique_name = escape_html(raw_unique_name) if raw_unique_name else None
         username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
         phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
         
-        # Get the persistent device model
         device_model = acc.get('device_model', 'N/A')
-
-        # --- MENTION LOGIC ---
         
-        link_text_content = ""
-        if first_name:
-            link_text_content = first_name  
-        elif user_id:
-            link_text_content = f"ID: {user_id}" 
-        else:
-            link_text_content = "Unknown (Refresh required)" 
-
-        mention_link = ""
-        if user_id:
-            mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
-        else:
-            mention_link = link_text_content
-
+        link_text_content = first_name or (f"ID: {user_id}" if user_id else "Unknown (Refresh required)")
+        mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>" if user_id else link_text_content
         name_display = mention_link
         if unique_name:
             name_display += f" ({unique_name})"
-            
-        # --- END OF MENTION LOGIC ---
 
         entry_text = (
             f"{name_display}\n"
             f"<b>User:</b> {username_str}\n"
             f"<b>Phone:</b> <code>{phone_str}</code>\n"
             f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
+            f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" 
             f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
         )
         text_parts.append(entry_text)
 
     final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
     
-    # Send as one message, but disable preview
     await update.message.reply_html(final_text, disable_web_page_preview=True)
 
 @owner_only
@@ -422,50 +416,31 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for acc in accounts:
             user_id = acc.get('user_id')
             
-            # Get raw values first
             raw_first_name = acc.get('first_name')
             raw_unique_name = acc.get('unique_name')
             raw_username = acc.get('username')
-            raw_phone = acc.get('phone_number') # Get None if missing
-            online_interval = acc.get('online_interval', '1440') # <-- NEW
+            raw_phone = acc.get('phone_number') 
+            online_interval = acc.get('online_interval', '1440') 
 
-            # Escape only if they exist
             first_name = escape_html(raw_first_name) if raw_first_name else None
             unique_name = escape_html(raw_unique_name) if raw_unique_name else None
             username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
             phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
             
-            # Get the persistent device model
             device_model = acc.get('device_model', 'N/A')
-
-            # --- MENTION LOGIC ---
-        
-            link_text_content = ""
-            if first_name:
-                link_text_content = first_name  
-            elif user_id:
-                link_text_content = f"ID: {user_id}" 
-            else:
-                link_text_content = "Unknown (Refresh required)" 
-
-            mention_link = ""
-            if user_id:
-                mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
-            else:
-                mention_link = link_text_content
-
+            
+            link_text_content = first_name or (f"ID: {user_id}" if user_id else "Unknown (Refresh required)")
+            mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>" if user_id else link_text_content
             name_display = mention_link
             if unique_name:
                 name_display += f" ({unique_name})"
-                
-            # --- END OF MENTION LOGIC ---
 
             entry_text = (
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
                 f"<b>Phone:</b> <code>{phone_str}</code>\n"
                 f"<b>Device:</b> <code>{escape_html(device_model)}</code>\n"
-                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n" # <-- NEW
+                f"<b>Interval:</b> <code>{escape_html(online_interval)} min</code>\n"
                 f"<b>ID:</b> <code>{user_id if user_id else 'N/A'}</code>"
             )
             text_parts.append(entry_text)
@@ -493,6 +468,10 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
         
     user_id_to_delete = int(query.data.split("_")[2])
     
+    # --- NEW: Stop online job ---
+    stop_online_job(user_id_to_delete)
+    # --- End ---
+    
     if user_id_to_delete in active_userbots:
         logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
         await active_userbots[user_id_to_delete].stop()
@@ -512,10 +491,8 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
     query = update.callback_query
     await query.answer()
-    context.user_data.clear() # Clear context before new flow
+    context.user_data.clear() 
     
-    # --- CRITICAL PERSISTENCE: Select device model ONCE for paste_multiple ---
-    # Select the permanent device model now and store it in user_data
     persistent_device_model = generate_device_name()
     context.user_data['persistent_device_model'] = persistent_device_model
     context.user_data['next_step'] = step
@@ -563,7 +540,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step != 'awaiting_multiple_accounts':
         return
 
-    # Clear the step now that we're handling it
     del context.user_data['next_step']
     
     text = update.message.text
@@ -577,7 +553,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     success, fail = 0, 0
     for session in session_strings:
-        # Pass the persistent device model for consistency
         status, _, detail = await start_userbot(
             session, 
             context.application, 
@@ -600,8 +575,6 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     
-    # --- CRITICAL PERSISTENCE: Select device model ONCE for paste_single ---
-    # Select the permanent device model now and store it in user_data
     persistent_device_model = generate_device_name()
     context.user_data['persistent_device_model'] = persistent_device_model
     
@@ -630,7 +603,7 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
     """Gets session string, adds account, and ends conversation."""
     session_string = clean_session_string(update.message.text)
     unique_name = context.user_data.get('unique_name')
-    persistent_device_model = context.user_data.get('persistent_device_model') # Retrieve the persistent model
+    persistent_device_model = context.user_data.get('persistent_device_model') 
     
     msg = await update.message.reply_text("⏳ Processing session string...")
     
@@ -639,7 +612,6 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
-    # Pass the persistent device model to start_userbot
     status, user_info, detail = await start_userbot(
         session_string, 
         context.application, 
@@ -669,37 +641,43 @@ paste_single_conv = ConversationHandler(
 )
 
 
-# --- NEW: Online Interval Flow ---
+# --- REBUILT: Online Interval Flow ---
 
-# (DELETED online_interval_start)
+@owner_only
+async def online_interval_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 1) Sends the initial /online_interval command response.
+    """
+    keyboard = [[InlineKeyboardButton("OnlineInterval settings ⌚️⚙️", callback_data="oi_start_selection")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_html(
+        "Click the button to select the account(s) for changing online interval.",
+        reply_markup=reply_markup
+    )
+    return AWAIT_BUTTON
+
 
 async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     (Images 2, 3, 4) Draws the paginated multi-select account menu.
-    This function is called by online_interval_menu (to send) and
-    handle_account_selection_callback (to edit).
     """
     query = update.callback_query
     
-    # Get data from user_data
     all_account_ids = context.user_data.get('all_account_ids', [])
     selected_accounts = context.user_data.get('selected_accounts', set())
     current_page = context.user_data.get('current_page', 0)
     
     if not all_account_ids:
-        # This case should be handled by the entry point, but as a safety check:
         if query: await query.answer("Error: Account list not found.", show_alert=True)
         return ConversationHandler.END
 
     total_accounts = len(all_account_ids)
     total_pages = math.ceil(total_accounts / ACCOUNTS_PER_PAGE)
     
-    # Get account details for the current page
     start_index = current_page * ACCOUNTS_PER_PAGE
     end_index = start_index + ACCOUNTS_PER_PAGE
     page_account_ids = all_account_ids[start_index:end_index]
     
-    # Fetch full docs for this page to get names and intervals
     page_accounts = []
     if accounts_collection is not None:
         page_accounts = list(accounts_collection.find(
@@ -707,13 +685,11 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
             {"first_name": 1, "user_id": 1, "unique_name": 1, "online_interval": 1}
         ))
     
-    # Sort them to match the order in page_account_ids (MongoDB doesn't guarantee order)
     account_map = {acc['user_id']: acc for acc in page_accounts}
     sorted_page_accounts = [account_map[uid] for uid in page_account_ids if uid in account_map]
 
     keyboard = []
     
-    # --- Top Control Buttons ---
     control_row1 = [
         InlineKeyboardButton(f"Select all ({total_accounts}) 🗂️", callback_data="oi_select_all"),
         InlineKeyboardButton(f"Unselect all ({len(selected_accounts)}) 🗑️", callback_data="oi_unselect_all"),
@@ -725,61 +701,54 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
     keyboard.append(control_row1)
     keyboard.append(control_row2)
 
-    # --- Account Buttons ---
     account_buttons = []
     for acc in sorted_page_accounts:
         user_id = acc['user_id']
         name = escape_html(acc.get('first_name', acc.get('unique_name', str(user_id))))
-        interval = acc.get('online_interval', '1440') # Default 1440
+        interval = acc.get('online_interval', '1440') 
         
         is_selected = user_id in selected_accounts
         
-        prefix = "✅" if is_selected else "✳️"
-        button_text = f"{prefix} {name} ({interval}m)"
-        callback = f"oi_toggle_{user_id}"
+        # --- EMOJI FIX ---
+        prefix = ""
+        if is_selected:
+            prefix = "✅"
+        elif interval != '1440':
+            prefix = "⌚️"
         
+        button_text = f"{prefix} {name} ({interval}m)".strip()
+        # --- END EMOJI FIX ---
+        
+        callback = f"oi_toggle_{user_id}"
         account_buttons.append(InlineKeyboardButton(button_text, callback_data=callback))
 
-    # Arrange account buttons in 2 columns
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
-    # --- Done Button ---
     keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="oi_done")])
 
-    # --- Pagination Buttons ---
     page_buttons = []
     if current_page > 0:
         page_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data="oi_prev_page"))
-        
-    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="oi_noop")) # No-op button
-
+    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="oi_noop"))
     if current_page < total_pages - 1:
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="oi_next_page"))
-        
     keyboard.append(page_buttons)
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # --- Final Message Text ---
     message_text = (
         f"<b>Account selection [multi]</b>\n"
         f"Page: {current_page + 1} / {total_pages}\n"
         f"Selected: {len(selected_accounts)} / {total_accounts}"
     )
     
-    # --- NEW: Handle send vs edit ---
-    if query:
-        # This was a button press (toggle, next page, etc.)
-        try:
-            await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-        except Exception as e:
-            logger.warning(f"Error editing message in draw_account_selection_menu: {e}")
-            await query.answer("Error updating menu.")
-    elif update.message:
-        # This was the initial /online_interval command
-        await update.message.reply_html(message_text, reply_markup=reply_markup)
-    
+    # This function is only called from callbacks, so we always edit
+    try:
+        await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"Error editing message in draw_account_selection_menu: {e}")
+        
     return SELECT_ACCOUNTS
 
 
@@ -788,32 +757,26 @@ async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     (Image 2) Entry point for the ConversationHandler.
     Fetches all accounts, sets up user_data, and draws the menu.
-    Triggered by /online_interval command.
     """
-    # Handles both command and callback-query (from fallback)
-    message_context = update.message or update.callback_query.message
+    query = update.callback_query
+    await query.answer()
     
-    if update.callback_query:
-        await update.callback_query.answer() # Acknowledge fallback click
-
     if accounts_collection is None:
-        await message_context.reply_text("⚠️ Database connection is not available. Please check logs.")
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
-    # Fetch ALL account user_ids once and store them
     all_accounts = list(accounts_collection.find({}, {"user_id": 1}))
     if not all_accounts:
-        await message_context.reply_text("There are no accounts to configure. Please /add one first.")
+        await query.edit_message_text("There are no accounts to configure. Please /add one first.")
         return ConversationHandler.END
         
     all_account_ids = [acc['user_id'] for acc in all_accounts]
     
     context.user_data.clear()
     context.user_data['all_account_ids'] = all_account_ids
-    context.user_data['selected_accounts'] = set() # Start with empty selection
+    context.user_data['selected_accounts'] = set()
     context.user_data['current_page'] = 0
     
-    # Call the draw function to send the initial message
     return await draw_account_selection_menu(update, context)
 
 
@@ -866,14 +829,13 @@ async def handle_account_selection_callback(update: Update, context: ContextType
             context.user_data['current_page'] = current_page - 1
             
     elif data == "oi_noop":
-        return SELECT_ACCOUNTS # Do nothing, just refresh
+        return SELECT_ACCOUNTS 
         
     elif data == "oi_done":
         if not selected_accounts:
             await query.answer("⚠️ Please select at least one account.", show_alert=True)
-            return SELECT_ACCOUNTS # Stay in this state
+            return SELECT_ACCOUNTS 
         
-        # (Step 5) Transition to next step
         await query.edit_message_text(
             "💭 Send the new interval now (in minutes, max. 1440; 24 hours)\n\n"
             "ℹ️ You can send minutes like this: <code>1-140</code> to make me set a random number "
@@ -883,7 +845,6 @@ async def handle_account_selection_callback(update: Update, context: ContextType
         )
         return AWAIT_INTERVAL
 
-    # Save changes and redraw
     context.user_data['selected_accounts'] = selected_accounts
     return await draw_account_selection_menu(update, context)
 
@@ -906,7 +867,6 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.clear()
         return ConversationHandler.END
         
-    # --- Validate Input ---
     interval_to_set = None
     if "-" in user_input:
         parts = user_input.split("-")
@@ -916,25 +876,30 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
                 max_val = int(parts[1])
                 if 0 < min_val <= max_val <= 1440:
                     interval_to_set = f"{min_val}-{max_val}"
-            except ValueError:
-                pass # Will fail validation
+            except ValueError: pass
     else:
         try:
             val = int(user_input)
             if 0 < val <= 1440:
                 interval_to_set = str(val)
-        except ValueError:
-            pass # Will fail validation
+        except ValueError: pass
 
     if interval_to_set is None:
         await update.message.reply_text("Invalid format. Please send a number (e.g., 60) or a range (e.g., 30-90) between 1 and 1440.")
-        return AWAIT_INTERVAL # Stay in this state
+        return AWAIT_INTERVAL 
 
-    # --- Update Database ---
     accounts_collection.update_many(
         {"user_id": {"$in": list(selected_accounts)}},
         {"$set": {"online_interval": interval_to_set}}
     )
+    
+    # --- NEW: Update running jobs ---
+    for user_id in selected_accounts:
+        stop_online_job(user_id) # Stop old job
+        if user_id in active_userbots:
+            client = active_userbots[user_id]
+            await schedule_online_job(client, interval_to_set, context.application)
+    # --- End ---
     
     await update.message.reply_text("✅ Saved online interval settings.")
     context.user_data.clear()
@@ -958,11 +923,17 @@ async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # Set to 1440 (the default)
+    interval_to_set = "1440"
     accounts_collection.update_many(
         {"user_id": {"$in": list(selected_accounts)}},
-        {"$set": {"online_interval": "1440"}} # Store default explicitly
+        {"$set": {"online_interval": interval_to_set}}
     )
+    
+    # --- NEW: Stop running jobs ---
+    for user_id in selected_accounts:
+        stop_online_job(user_id) # Stop old job
+        # No need to reschedule, 1440 means no job
+    # --- End ---
     
     await update.message.reply_text("✅ Saved online interval settings (reset to 1440).")
     context.user_data.clear()
@@ -980,7 +951,6 @@ async def cancel_interval_conv(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.callback_query.edit_message_text("Action cancelled.")
         except Exception:
             await update.callback_query.message.reply_text("Action cancelled.")
-            
     else:
         await update.message.reply_text("Action cancelled.")
             
@@ -990,9 +960,10 @@ async def cancel_interval_conv(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- Define the ConversationHandler ---
 online_interval_conv = ConversationHandler(
     entry_points=[
-        CommandHandler("online_interval", online_interval_menu)
+        CommandHandler("online_interval", online_interval_start)
     ],
     states={
+        AWAIT_BUTTON: [CallbackQueryHandler(online_interval_menu, pattern="^oi_start_selection$")],
         SELECT_ACCOUNTS: [CallbackQueryHandler(handle_account_selection_callback, pattern=r"^oi_")],
         AWAIT_INTERVAL: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input),
@@ -1002,7 +973,7 @@ online_interval_conv = ConversationHandler(
     fallbacks=[
         CommandHandler("cancel", cancel_interval_conv),
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$"),
-        CommandHandler("online_interval", online_interval_menu) # <-- Restart command as fallback
+        CommandHandler("online_interval", online_interval_start) # Restart command as fallback
     ],
-    conversation_timeout=600, # 10 minutes
+    conversation_timeout=600,
 )

@@ -25,7 +25,7 @@ from bot_handlers import (
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
     paste_single_conv, accounts_command, restart_command,
-    online_interval_conv # <-- IMPORT CONV, REMOVED online_interval_start
+    online_interval_conv # <-- Import the conversation handler
 )
 
 # --- New dummy function for silent command ---
@@ -71,7 +71,7 @@ def main() -> None:
     # 1. Conversation Handlers
     application.add_handler(gen_conv, group=0)
     application.add_handler(paste_single_conv, group=0)
-    application.add_handler(online_interval_conv, group=0) # <-- NEW
+    application.add_handler(online_interval_conv, group=0) # <-- ADDED
 
     # 2. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -87,7 +87,6 @@ def main() -> None:
     application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("restart", restart_command)) # NEW
-    # REMOVED CommandHandler("online_interval", online_interval_start)
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers

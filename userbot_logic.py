@@ -1,7 +1,7 @@
 import asyncio
 import random
 import traceback
-import re # <-- NEW
+import time
 from functools import partial
 
 from pyrogram import Client, filters
@@ -22,8 +22,71 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-from utils import generate_device_name, escape_html, parse_interval # <-- MODIFIED
-from jobs import online_interval_job # <-- NEW IMPORT
+from utils import generate_device_name, escape_html
+
+# --- NEW: Keep-alive Job Management ---
+active_online_jobs = {}
+
+async def perform_online_action(context: dict):
+    """Job callback to send/delete message."""
+    client: Client = context.job.data['client']
+    if not client.is_connected:
+        logger.warning(f"Client {client.me.id} not connected. Skipping online action.")
+        return
+
+    try:
+        msg = await client.send_message("me", f"Online action: {int(time.time())}")
+        await asyncio.sleep(1)
+        await msg.delete()
+        logger.info(f"Successfully performed online action for {client.me.id}")
+    except Exception as e:
+        logger.warning(f"Failed to perform online action for {client.me.id}: {e}")
+
+async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
+    """Schedules the repeating online action job."""
+    user_id = client.me.id
+    if user_id in active_online_jobs:
+        stop_online_job(user_id) # Stop existing job if any
+    
+    if not interval_str:
+        interval_str = '1440'
+
+    try:
+        if "-" in interval_str:
+            min_val, max_val = map(int, interval_str.split("-"))
+            # Get a random interval in seconds
+            interval_seconds = random.randint(min_val * 60, max_val * 60)
+        else:
+            interval_seconds = int(interval_str) * 60
+            
+    except ValueError:
+        logger.error(f"Invalid interval string '{interval_str}' for {user_id}. Defaulting to 1440min.")
+        interval_seconds = 1440 * 60
+
+    # Do not schedule job if interval is 1440 minutes (24 hours)
+    if interval_seconds == 1440 * 60:
+        logger.info(f"Interval for {user_id} is default (1440). No online job scheduled.")
+        return
+
+    job_context = {'client': client}
+    job = ptb_app.job_queue.run_repeating(
+        perform_online_action,
+        interval=interval_seconds,
+        first=random.randint(10, 60), # Start after 10-60 seconds
+        data=job_context,
+        name=f"online_job_{user_id}"
+    )
+    active_online_jobs[user_id] = job
+    logger.info(f"Scheduled online job for {user_id} every {interval_seconds} seconds.")
+
+def stop_online_job(user_id: int):
+    """Stops and removes the online job for a user."""
+    job = active_online_jobs.pop(user_id, None)
+    if job:
+        job.schedule_removal()
+        logger.info(f"Removed scheduled online job for {user_id}")
+# --- END: Keep-alive Job Management ---
+
 
 async def get_source_chat():
     """Returns the chat ID for the Telegram service messages."""
@@ -104,30 +167,24 @@ async def start_userbot(
     """
     me = None
     client = None 
-    
+    account_doc = None
     final_device_model = device_model_to_use
     
     # --- Persistence/Backfill Logic ---
     if final_device_model is None:
-        # Try to find existing account by session string to retrieve its device model
         if accounts_collection is not None and session_string:
-            # Note: We must search by session_string first, as user_id is not known until login
             account_doc = accounts_collection.find_one({"session_string": session_string})
             if account_doc and account_doc.get("device_model"):
                 final_device_model = account_doc["device_model"]
         
-        # If still no model (new account, or old account lacking field), select one
         if final_device_model is None:
             final_device_model = generate_device_name()
-            # Set update_info to True to ensure this newly selected model is saved to DB (backfill or new)
             update_info = True
 
-    # Final fallback check
     if final_device_model is None:
         final_device_model = "Unknown Device" 
     
     try:
-        # Use a unique name for persistent session file storage (on disk)
         session_prefix = unique_name if unique_name else session_string[-8:]
         client = Client(
             name=f"session_{session_prefix}", 
@@ -135,7 +192,6 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             workers=1,
-            # CRITICAL: Use the persistent device model for all starts
             device_model=final_device_model, 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
@@ -165,41 +221,37 @@ async def start_userbot(
             filters.chat(source_chat_id) & ~filters.service
         ))
 
-        # --- MODIFIED ---
-        # Store just the client
         active_userbots[me.id] = client
-        # --- END MODIFIED ---
-        
         
         # --- ACQUAINTANCE & INFO UPDATE ---
         
+        # If we didn't fetch doc earlier, fetch it now by user_id
+        if account_doc is None and accounts_collection is not None:
+            account_doc = accounts_collection.find_one({"user_id": me.id})
+            if account_doc and not device_model_to_use:
+                # Backfill: If we have a doc, use its device model
+                final_device_model = account_doc.get("device_model", final_device_model)
+
         account_info = {
             "user_id": me.id, 
             "first_name": me.first_name, 
             "username": me.username,
             "phone_number": me.phone_number, 
             "session_string": session_string,
-            "device_model": final_device_model, # CRITICAL: Save the persistent model
+            "device_model": final_device_model,
         }
         if unique_name:
             account_info["unique_name"] = unique_name
             
         current_acquainted_status = False
-        
-        # Get existing acquaintance status if not running new acquaintance logic
-        if not run_acquaintance and accounts_collection is not None:
-            account_doc = accounts_collection.find_one({"user_id": me.id})
-            # This check is safer than relying on the previous search by session_string
-            current_acquainted_status = (account_doc and account_doc.get('is_acquainted', False))
+        if account_doc:
+            current_acquainted_status = account_doc.get('is_acquainted', False)
 
-        # Only run acquaintance logic if explicitly told to (i.e., when adding account)
         if run_acquaintance:
             bot_username = ptb_app.bot.username
             if bot_username:
                 try:
-                    # Send a silent command to the bot
                     await client.send_message(bot_username, "/init_abc")
-                    # Immediately leave and delete the chat
                     await client.leave_chat(bot_username, delete=True)
                     logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
@@ -210,12 +262,14 @@ async def start_userbot(
                 logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
         else:
-            # Preserve existing status during restart/refresh
             account_info["is_acquainted"] = current_acquainted_status 
 
         if update_info:
             if accounts_collection is not None:
-                # Use user_id as the unique key after we have authenticated it
+                # Get the existing online_interval to preserve it
+                existing_interval = account_doc.get("online_interval", "1440") if account_doc else "1440"
+                account_info["online_interval"] = existing_interval
+                
                 accounts_collection.update_one(
                     {"user_id": me.id}, 
                     {"$set": account_info}, 
@@ -224,24 +278,15 @@ async def start_userbot(
             else:
                 logger.error(f"Database not connected. Could not save account info for {me.id}")
         
-        # --- NEW: Schedule the first interval job ---
-        if accounts_collection is not None:
-            # Re-fetch account doc to get the saved interval
-            final_account_doc = accounts_collection.find_one({"user_id": me.id})
-            interval_str = "1440" # Default
-            if final_account_doc:
-                interval_str = final_account_doc.get("online_interval", "1440")
+        # --- NEW: Schedule Online Job ---
+        final_interval_str = "1440"
+        if 'online_interval' in account_info:
+            final_interval_str = account_info['online_interval']
+        elif account_doc:
+            final_interval_str = account_doc.get("online_interval", "1440")
             
-            # Stagger first run to prevent all bots running at once on restart
-            first_run_delay = random.randint(5, 60) 
-            
-            ptb_app.job_queue.run_once(
-                online_interval_job, 
-                first_run_delay, 
-                data={'user_id': me.id}, 
-                name=f"interval_{me.id}"
-            )
-        # --- END NEW ---
+        await schedule_online_job(client, final_interval_str, ptb_app)
+        # --- End ---
                 
         return "success", me, "Successfully started."
     
@@ -282,9 +327,8 @@ async def start_all_userbots_from_db(
     
     for account in all_accounts:
         session_str = account.get("session_string", "")
-        # Do NOT retrieve the device_model here. Let start_userbot handle the 
-        # backfill logic internally by passing the device model if it exists, or None to trigger selection.
         device_model = account.get("device_model") 
+        unique_name = account.get("unique_name") # Pass unique_name for session file
         
         if not session_str: continue
         
@@ -292,6 +336,7 @@ async def start_all_userbots_from_db(
             session_str, 
             application, 
             update_info=update_info,
+            unique_name=unique_name,
             device_model_to_use=device_model 
         )
         if status == "success":
