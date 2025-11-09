@@ -1,5 +1,5 @@
 import asyncio
-import math
+import math 
 from functools import partial
 from telegram import Update
 from telegram.ext import (
@@ -25,7 +25,7 @@ from bot_handlers import (
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
     paste_single_conv, accounts_command, restart_command,
-    online_interval_start, online_interval_conv 
+    online_interval_conv # <-- IMPORT CONV, REMOVED online_interval_start
 )
 
 # --- New dummy function for silent command ---
@@ -49,14 +49,11 @@ async def post_shutdown_tasks(application: Application):
     """Runs before the bot application shuts down."""
     logger.info("Shutting down userbots...")
     
-    # --- MODIFIED ---
-    # Reverted to simple version.
-    # The JobQueue is shut down by the application automatically.
+    # Use asyncio.gather for concurrent, faster shutdown
     stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
     if stop_tasks:
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         logger.info("All userbots gracefully stopped.")
-    # --- END MODIFIED ---
     
     logger.info("Shutdown complete.")
 
@@ -74,7 +71,7 @@ def main() -> None:
     # 1. Conversation Handlers
     application.add_handler(gen_conv, group=0)
     application.add_handler(paste_single_conv, group=0)
-    application.add_handler(online_interval_conv, group=0) 
+    application.add_handler(online_interval_conv, group=0) # <-- NEW
 
     # 2. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -89,8 +86,8 @@ def main() -> None:
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(CommandHandler("restart", restart_command)) 
-    application.add_handler(CommandHandler("online_interval", online_interval_start)) 
+    application.add_handler(CommandHandler("restart", restart_command)) # NEW
+    # REMOVED CommandHandler("online_interval", online_interval_start)
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers
@@ -100,7 +97,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     
     # Navigation/Action callbacks
-    application.add_handler(CallbackQueryHandler(restart_command, pattern="^call_restart$")) 
+    application.add_handler(CallbackQueryHandler(restart_command, pattern="^call_restart$")) # NEW: Button action for restart
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
     application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
@@ -124,9 +121,15 @@ if __name__ == "__main__":
             main()
         except KeyboardInterrupt:
             logger.info("Bot stopped manually.")
-        except SystemExit:
-            # Catch SystemExit from restart command gracefully
-            logger.info("SystemExit received. Exiting gracefully.")
+        except SystemExit as e:
+            # --- THIS IS THE RESTART FIX ---
+            # Catch SystemExit. If it's code 1 (from restart), re-raise to exit non-zero
+            if e.code == 1:
+                logger.info("SystemExit(1) received, triggering container restart.")
+                raise # Re-raise the SystemExit(1)
+            else:
+                # Otherwise, it's a normal graceful exit
+                logger.info("SystemExit received. Exiting gracefully.")
         except Exception:
              # Ensure proper logging for unexpected crashes
             import traceback
