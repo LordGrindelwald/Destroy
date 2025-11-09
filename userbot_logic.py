@@ -30,11 +30,11 @@ active_online_jobs = {}
 async def perform_online_action(context: dict):
     """
     Job callback to send/delete message, wait 10s, then force disconnect/reconnect.
-    This simulates a brief offline state.
+    This simulates a brief offline state only for the client in the job data.
     """
     client: Client = context.job.data['client']
     
-    # If the client is not connected, skip the initial actions.
+    # Safety check: if the client is not connected, we can't perform the action.
     if not client.is_connected:
         logger.warning(f"Client {client.me.id} not connected. Skipping online action.")
         return
