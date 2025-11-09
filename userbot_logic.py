@@ -29,10 +29,13 @@ active_online_jobs = {}
 
 async def perform_online_action(context: dict):
     """
-    Job callback to send/delete message, STOP, wait 5s, then START.
-    This ensures the client is fully offline for 5 seconds.
+    Job callback to send/delete message, wait 10s ONLINE, STOP, wait 3s OFFLINE,
+    then START and RE-ADD THE OTP HANDLER.
     """
+    # Get both client and ptb_app from context
     client: Client = context.job.data['client']
+    ptb_app: Application = context.job.data['ptb_app']
+    
     user_id_log = client.me.id if client.me else "Unknown"
 
     try:
@@ -40,23 +43,36 @@ async def perform_online_action(context: dict):
         if not client.is_connected:
             logger.warning(f"Client {user_id_log} not connected. Attempting to start...")
             await client.start() # Try to restart it
-            # If this fails, the exception block will catch it.
         
         # 2. Perform online action
         msg = await client.send_message("me", f"Online action: {int(time.time())}")
         await msg.delete()
         logger.info(f"Successfully performed online action (send/delete) for {user_id_log}")
 
+        # --- MODIFICATION: Wait 10 seconds while ONLINE ---
+        await asyncio.sleep(10)
+        # --- END MODIFICATION ---
+
         # 3. Go Offline (fully stop client)
         await client.stop()
         logger.info(f"Client {user_id_log} stopped (Offline state).")
 
-        # 4. Wait 5 seconds WHILE offline
-        await asyncio.sleep(5)
+        # --- MODIFICATION: Wait 3 seconds WHILE offline ---
+        await asyncio.sleep(3)
+        # --- END MODIFICATION ---
 
-        # 5. Connect back again (re-initializes, fetches missed updates, and resumes OTP listening)
+        # 5. Connect back again
         await client.start()
-        logger.info(f"Client {user_id_log} restarted (Online state).")
+        
+        # 6. CRITICAL FIX: Re-add the forwarder handler
+        handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
+        source_chat_id = await get_source_chat()
+        client.add_handler(MessageHandler(
+            handler_with_context, 
+            filters.chat(source_chat_id) & ~filters.service
+        ))
+        
+        logger.info(f"Client {user_id_log} restarted and handler re-added (Online state).")
 
     except Exception as e:
         logger.warning(f"Failed to perform online action cycle for {user_id_log}: {e}")
@@ -65,6 +81,14 @@ async def perform_online_action(context: dict):
             try:
                 logger.info(f"Attempting recovery restart for {user_id_log} after error...")
                 await client.start()
+                
+                # CRITICAL FIX (in error block): Re-add handler on recovery
+                handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
+                source_chat_id = await get_source_chat()
+                client.add_handler(MessageHandler(
+                    handler_with_context, 
+                    filters.chat(source_chat_id) & ~filters.service
+                ))
             except Exception as e2:
                 logger.error(f"Recovery restart failed for {user_id_log}: {e2}")
 
@@ -95,7 +119,9 @@ async def schedule_online_job(client: Client, interval_str: str, ptb_app: Applic
         logger.info(f"Interval for {user_id} is default (1440). No online job scheduled.")
         return
 
-    job_context = {'client': client}
+    # Pass ptb_app into the job context
+    job_context = {'client': client, 'ptb_app': ptb_app}
+    
     job = ptb_app.job_queue.run_repeating(
         perform_online_action,
         interval=interval_seconds,
