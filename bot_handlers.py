@@ -1,5 +1,5 @@
 import asyncio
-import sys
+import sys # <-- Ensure sys is imported
 from datetime import datetime
 from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
@@ -297,7 +297,6 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. Stop all userbots gracefully
     try:
-        # Use asyncio.gather for concurrent stopping
         clients_to_stop = list(active_userbots.values())
         active_userbots.clear()
         await asyncio.gather(*(client.stop() for client in clients_to_stop if client.is_connected))
@@ -308,12 +307,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Stop the PTB application's polling loop
     context.application.stop_running()
     
-    # 4. Use asyncio.to_thread and sys.exit(0) to force exit after a short delay
+    # 4. Use asyncio.to_thread and sys.exit(1) to force exit with error status
     async def force_exit():
         await asyncio.sleep(2) # Give a moment for the notification to send and for cleanup
-        logger.critical("Restart requested. Forcing system exit.")
-        # sys.exit(0) signals a clean exit to the container orchestrator which will then restart the service.
-        sys.exit(0)
+        logger.critical("Restart requested. Forcing system exit with status 1.")
+        # sys.exit(1) signals an error, which triggers a restart on most container services.
+        sys.exit(1) # <-- CRITICAL FIX HERE!
 
     # Start the exit task
     asyncio.create_task(force_exit())

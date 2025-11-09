@@ -93,8 +93,8 @@ async def start_userbot(
     """
     me = None
     
-    # Determine the final device model to use
-    final_device_model = device_model_to_use if device_model_to_use else generate_device_name()
+    # Determine the final device model to use (persistence fix)
+    final_device_model = device_model_to_use if device_model_to_use else generate_device_name() 
     
     try:
         session_prefix = unique_name if unique_name else session_string[-8:]
@@ -104,8 +104,8 @@ async def start_userbot(
             api_hash=TD_API_HASH,
             session_string=session_string,
             workers=1,
-            # --- MEMORY FIX: Prevent receiving all unnecessary updates ---
-            no_updates=True, 
+            # MEMORY & STABILITY FIX: Keep updates active, but limit processing thread pool
+            update_workers=10, 
             device_model=final_device_model, 
             system_version=TD_SYSTEM_VERSION,
             app_version=TD_APP_VERSION,
@@ -162,8 +162,9 @@ async def start_userbot(
                     logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
+                    # Catching errors here ensures failure to delete chat doesn't crash userbot startup
                     logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
-                    account_info["is_acquainted"] = False # Mark as failed
+                    account_info["is_acquainted"] = False 
             else:
                 logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
@@ -173,7 +174,7 @@ async def start_userbot(
                 account_doc = accounts_collection.find_one({"user_id": me.id})
                 account_info["is_acquainted"] = (account_doc and account_doc.get('is_acquainted', False))
             else:
-                account_info["is_acquainted"] = False # Should be impossible but safe default
+                account_info["is_acquainted"] = False 
 
         if update_info:
             if accounts_collection is not None:
@@ -205,7 +206,7 @@ async def start_userbot(
         error_detail = f"Unexpected Error: {e}"
         return "error", None, error_detail
     finally:
-        # --- Memory Fix: Ensure a clean stop if not successfully added to active_userbots ---
+        # Ensure a clean stop if not successfully added to active_userbots
         if 'client' in locals() and client.is_connected:
             is_active = me and me.id in active_userbots
             if not is_active:
