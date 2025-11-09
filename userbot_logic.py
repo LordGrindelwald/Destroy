@@ -28,19 +28,41 @@ from utils import generate_device_name, escape_html
 active_online_jobs = {}
 
 async def perform_online_action(context: dict):
-    """Job callback to send/delete message."""
+    """
+    Job callback to send/delete message, wait 10s, then force disconnect/reconnect.
+    This simulates a brief offline state.
+    """
     client: Client = context.job.data['client']
+    
+    # If the client is not connected, skip the initial actions.
     if not client.is_connected:
         logger.warning(f"Client {client.me.id} not connected. Skipping online action.")
         return
 
     try:
+        # 1. Send message to saved messages ("me")
         msg = await client.send_message("me", f"Online action: {int(time.time())}")
-        await asyncio.sleep(1)
+        
+        # 2. Immediately delete it
         await msg.delete()
-        logger.info(f"Successfully performed online action for {client.me.id}")
+        logger.info(f"Successfully performed online action (send/delete) for {client.me.id}")
+        
+        # 3. Wait 10 seconds (Simulate brief offline period)
+        await asyncio.sleep(10)
+        
+        # 4. Disconnect the account (Goes explicitly offline)
+        await client.disconnect()
+        logger.info(f"Client {client.me.id} disconnected (Offline state).")
+        
+        # 5. Connect back again (Comes back online)
+        await client.connect()
+        logger.info(f"Client {client.me.id} reconnected (Online state).")
+        
     except Exception as e:
-        logger.warning(f"Failed to perform online action for {client.me.id}: {e}")
+        user_id = client.me.id if client.me else "Unknown" 
+        logger.warning(f"Failed to perform online action (disconnect/reconnect) for {user_id}: {e}")
+        # Allow the job queue to attempt the action again in the next interval.
+
 
 async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
     """Schedules the repeating online action job."""
