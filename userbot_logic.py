@@ -40,9 +40,6 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         
         # Invalidate sign-in codes to destroy the OTP immediately
         try:
-            # We use try/except block here because not all Pyrogram versions
-            # or accounts might have this function available, but it's the core
-            # destruction logic.
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
@@ -100,16 +97,32 @@ async def start_userbot(
 ):
     """
     Starts a userbot Pyrogram Client.
-    - update_info: If True, saves/updates info in DB.
-    - run_acquaintance: If True, runs the one-time acquaintance logic.
-    - device_model_to_use: The persistent device model name (from DB or new selection).
+    
+    CRITICAL LOGIC: Implements device persistence and backfill.
     """
     me = None
-    client = None # Initialize client here for finally block access
+    client = None 
     
-    # --- Persistence Logic ---
-    # Use the passed device model (from DB/context) if available, otherwise select a new one.
-    final_device_model = device_model_to_use if device_model_to_use else generate_device_name()
+    final_device_model = device_model_to_use
+    
+    # --- Persistence/Backfill Logic ---
+    if final_device_model is None:
+        # Try to find existing account by session string to retrieve its device model
+        if accounts_collection is not None and session_string:
+            # Note: We must search by session_string first, as user_id is not known until login
+            account_doc = accounts_collection.find_one({"session_string": session_string})
+            if account_doc and account_doc.get("device_model"):
+                final_device_model = account_doc["device_model"]
+        
+        # If still no model (new account, or old account lacking field), select one
+        if final_device_model is None:
+            final_device_model = generate_device_name()
+            # Set update_info to True to ensure this newly selected model is saved to DB (backfill or new)
+            update_info = True
+
+    # Final fallback check
+    if final_device_model is None:
+        final_device_model = "Unknown Device" 
     
     try:
         # Use a unique name for persistent session file storage (on disk)
@@ -138,7 +151,6 @@ async def start_userbot(
         me = await client.get_me()
         
         if me.id in active_userbots:
-            # If the bot is already running (e.g., from a quick restart attempt), stop the new one
             await client.stop() 
             return "already_exists", None, "This user is already running."
         
@@ -153,7 +165,7 @@ async def start_userbot(
 
         active_userbots[me.id] = client
         
-        # --- ACQUAINTANCE LOGIC ---
+        # --- ACQUAINTANCE & INFO UPDATE ---
         
         account_info = {
             "user_id": me.id, 
@@ -168,43 +180,43 @@ async def start_userbot(
             
         current_acquainted_status = False
         
-        # Get existing acquaintance status if refreshing (not running run_acquaintance)
+        # Get existing acquaintance status if not running new acquaintance logic
         if not run_acquaintance and accounts_collection is not None:
             account_doc = accounts_collection.find_one({"user_id": me.id})
+            # This check is safer than relying on the previous search by session_string
             current_acquainted_status = (account_doc and account_doc.get('is_acquainted', False))
-            
-        
-        if run_acquaintance and not current_acquainted_status:
+
+        # Only run acquaintance logic if explicitly told to (i.e., when adding account)
+        if run_acquaintance:
             bot_username = ptb_app.bot.username
             if bot_username:
                 try:
-                    # 1. Wait for connection stability to ensure message is sent
-                    await asyncio.sleep(2) 
-                    # 2. Send the command to initiate chat
+                    # Send a silent command to the bot
                     await client.send_message(bot_username, "/init_abc")
-                    # 3. Immediately leave and delete the chat (safety measure)
+                    # Immediately leave and delete the chat
                     await client.leave_chat(bot_username, delete=True)
                     logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
                     logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
-                    account_info["is_acquainted"] = False 
+                    account_info["is_acquainted"] = False # Mark as failed
             else:
                 logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
         else:
-            # Preserve existing status if we didn't just run the acquaintance process
-            account_info["is_acquainted"] = current_acquainted_status
+            # Preserve existing status during restart/refresh
+            account_info["is_acquainted"] = current_acquainted_status 
 
-
-        if update_info and accounts_collection is not None:
-            accounts_collection.update_one(
-                {"user_id": me.id}, 
-                {"$set": account_info}, 
-                upsert=True
-            )
-        elif accounts_collection is None:
-            logger.error(f"Database not connected. Could not save account info for {me.id}")
+        if update_info:
+            if accounts_collection is not None:
+                # Use user_id as the unique key after we have authenticated it
+                accounts_collection.update_one(
+                    {"user_id": me.id}, 
+                    {"$set": account_info}, 
+                    upsert=True
+                )
+            else:
+                logger.error(f"Database not connected. Could not save account info for {me.id}")
                 
         return "success", me, "Successfully started."
     
@@ -226,19 +238,15 @@ async def start_userbot(
         error_detail = f"Unexpected Error: {e}"
         return "error", None, error_detail
     finally:
-        # Ensure the client is stopped if it failed to fully initialize
-        is_active = me and me.id in active_userbots
-        if 'client' in locals() and client and client.is_connected and not is_active:
-            try:
+        if 'client' in locals() and client and client.is_connected:
+            is_active = me and me.id in active_userbots
+            if not is_active:
                 await client.stop()
-            except Exception:
-                pass # Ignore stop errors on already broken clients
 
 async def start_all_userbots_from_db(
     application: Application, 
     update_info: bool = False
 ):
-    """Starts all userbots saved in the database, using their persistent device models."""
     if accounts_collection is None:
         logger.error("Database not connected. Cannot start userbots from DB.")
         return 0, 0, ["Database connection failed."]
@@ -249,8 +257,9 @@ async def start_all_userbots_from_db(
     
     for account in all_accounts:
         session_str = account.get("session_string", "")
-        # Retrieve the persistent device model
-        device_model = account.get("device_model")
+        # Do NOT retrieve the device_model here. Let start_userbot handle the 
+        # backfill logic internally by passing the device model if it exists, or None to trigger selection.
+        device_model = account.get("device_model") 
         
         if not session_str: continue
         
@@ -258,7 +267,7 @@ async def start_all_userbots_from_db(
             session_str, 
             application, 
             update_info=update_info,
-            device_model_to_use=device_model # Pass the persistent model
+            device_model_to_use=device_model 
         )
         if status == "success":
             success_count += 1

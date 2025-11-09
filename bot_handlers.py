@@ -36,7 +36,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gracefully stops the application and triggers a container restart."""
+    """Gracefully stops the application and triggers a container restart (exit code 1)."""
     
     await update.message.reply_text("🔄 Restarting service now...")
     
@@ -51,7 +51,7 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Stop the Telegram Bot Application
     await context.application.stop_running() 
     
-    # Exit with status 1 to trigger auto-restart in container environments like Koyeb
+    # CRITICAL FIX: Exit with status 1 to trigger auto-restart in container environments
     sys.exit(1)
 
 
@@ -200,7 +200,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_bots = accounts_collection.count_documents({})
         
     running_bots = len(active_userbots)
-    bot_username = context.application.bot.username
     
     status_text = (f"<b>Bot Status</b>\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -316,7 +315,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action cancelled.")
 
 # --- CallbackQuery Handlers ---
-# In lordgrindelwald/destroy/Destroy-split/bot_handlers.py
 
 @owner_only
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -353,30 +351,27 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get the persistent device model
         device_model = acc.get('device_model', 'N/A')
 
-        # --- MODIFIED MENTION LOGIC ---
+        # --- MENTION LOGIC ---
         
         link_text_content = ""
         if first_name:
-            link_text_content = first_name  # Already escaped
+            link_text_content = first_name  
         elif user_id:
-            link_text_content = f"ID: {user_id}" # Fallback
+            link_text_content = f"ID: {user_id}" 
         else:
-            link_text_content = "Unknown (Refresh required)" # Ultimate fallback
+            link_text_content = "Unknown (Refresh required)" 
 
         mention_link = ""
         if user_id:
-            # Create the link
             mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
         else:
-            # No user_id, so just use the text
             mention_link = link_text_content
 
         name_display = mention_link
         if unique_name:
-            # Add the unique_name *after* the link
             name_display += f" ({unique_name})"
             
-        # --- END OF MODIFIED LOGIC ---
+        # --- END OF MENTION LOGIC ---
 
         entry_text = (
             f"{name_display}\n"
@@ -428,30 +423,27 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Get the persistent device model
             device_model = acc.get('device_model', 'N/A')
 
-            # --- MODIFIED MENTION LOGIC ---
+            # --- MENTION LOGIC ---
         
             link_text_content = ""
             if first_name:
-                link_text_content = first_name  # Already escaped
+                link_text_content = first_name  
             elif user_id:
-                link_text_content = f"ID: {user_id}" # Fallback
+                link_text_content = f"ID: {user_id}" 
             else:
-                link_text_content = "Unknown (Refresh required)" # Ultimate fallback
+                link_text_content = "Unknown (Refresh required)" 
 
             mention_link = ""
             if user_id:
-                # Create the link
                 mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>"
             else:
-                # No user_id, so just use the text
                 mention_link = link_text_content
 
             name_display = mention_link
             if unique_name:
-                # Add the unique_name *after* the link
                 name_display += f" ({unique_name})"
                 
-            # --- END OF MODIFIED LOGIC ---
+            # --- END OF MENTION LOGIC ---
 
             entry_text = (
                 f"{name_display}\n"
@@ -506,7 +498,7 @@ async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step
     await query.answer()
     context.user_data.clear() # Clear context before new flow
     
-    # --- CRITICAL PERSISTENCE FIX: Select device model for paste_multiple here ---
+    # --- CRITICAL PERSISTENCE: Select device model ONCE for paste_multiple ---
     # Select the permanent device model now and store it in user_data
     persistent_device_model = generate_device_name()
     context.user_data['persistent_device_model'] = persistent_device_model
@@ -545,8 +537,6 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles text input for flows that use context.user_data['next_step'].
-    This is intentionally in group 1 (lower priority) so that
-    ConversationHandlers (group 0) can process text first.
     """
     if update.effective_user.id != OWNER_ID:
         return
@@ -571,7 +561,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     success, fail = 0, 0
     for session in session_strings:
-        # CRITICAL PERSISTENCE FIX: Pass the persistent device model for consistency
+        # Pass the persistent device model for consistency
         status, _, detail = await start_userbot(
             session, 
             context.application, 
@@ -594,7 +584,7 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     
-    # --- CRITICAL PERSISTENCE FIX: Select device model ONCE for paste_single here ---
+    # --- CRITICAL PERSISTENCE: Select device model ONCE for paste_single ---
     # Select the permanent device model now and store it in user_data
     persistent_device_model = generate_device_name()
     context.user_data['persistent_device_model'] = persistent_device_model
