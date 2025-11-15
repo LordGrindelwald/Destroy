@@ -122,12 +122,14 @@ async def end_conversation_on_command(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("✖️ Previous action cancelled by new command. Please send your command again.")
     return ConversationHandler.END
 
-# This list will be shared with session_generator.py
+# --- THIS IS THE FIX ---
+# Removed add, remove, and online_interval from this list
+# as they are entry_points and should not be fallbacks.
 COMMAND_FALLBACKS = [
     CommandHandler("start", end_conversation_on_command),
     CommandHandler("settings", end_conversation_on_command),
-    CommandHandler("add", end_conversation_on_command),
-    CommandHandler("remove", end_conversation_on_command),
+    # CommandHandler("add", end_conversation_on_command), # <-- REMOVED
+    # CommandHandler("remove", end_conversation_on_command), # <-- REMOVED
     CommandHandler("rename", end_conversation_on_command),
     CommandHandler("status", end_conversation_on_command),
     CommandHandler("temp", end_conversation_on_command),
@@ -139,6 +141,6 @@ COMMAND_FALLBACKS = [
     CommandHandler("toggle_otp_destroy", end_conversation_on_command),
     CommandHandler("restart", end_conversation_on_command),
     CommandHandler("deduplicate_db", end_conversation_on_command),
-    CommandHandler("online_interval", end_conversation_on_command),
+    # CommandHandler("online_interval", end_conversation_on_command), # <-- REMOVED
 ]
 # --- END BUGFIX ---

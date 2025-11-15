@@ -1449,7 +1449,7 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
             total_deleted += uid_deleted_count
             
         # --- 4. Fix unique_name duplicates ---
-        # Find documents where unique_name is not null
+        # --- THIS IS THE FIX: Group by the $toLower version of the name ---
         pipeline_name = [
             {
                 '$match': {
@@ -1458,7 +1458,7 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
             },
             {
                 '$group': {
-                    '_id': '$unique_name', 
+                    '_id': {'$toLower': '$unique_name'}, 
                     'count': {'$sum': 1}, 
                     'ids': {'$push': '$_id'}
                 }
@@ -1469,6 +1469,7 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
                 }
             }
         ]
+        # --- END FIX ---
         duplicates_name = list(accounts_collection.aggregate(pipeline_name))
         
         name_deleted_count = 0
