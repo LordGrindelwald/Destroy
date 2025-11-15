@@ -21,7 +21,7 @@ from config import (
     paused_forwarding, paused_notifications, logger,
     UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE,
     AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL,
-    SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE # <-- NEW STATES
+    AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE # <-- NEW STATES
 )
 from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
 from userbot_logic import (
@@ -1023,15 +1023,34 @@ async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAU
 async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Entry point for the /remove ConversationHandler.
+    Shows a start button.
+    """
+    # --- FIX: Show start button ---
+    keyboard = [[InlineKeyboardButton("Select Accounts to Remove 🗑️", callback_data="rm_start_selection")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_html(
+        "Click the button to select the account(s) for removal.",
+        reply_markup=reply_markup
+    )
+    return AWAIT_BUTTON_REMOVE # <-- NEW STATE
+
+
+@owner_only
+async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Callback for the start button.
     Fetches all accounts, sets up user_data, and draws the menu.
     """
+    query = update.callback_query
+    await query.answer()
+    
     if accounts_collection is None:
-        await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
     all_accounts = list(accounts_collection.find({}, {"user_id": 1}))
     if not all_accounts:
-        await update.message.reply_html("There are no accounts to remove. Please /add one first.")
+        await query.edit_message_text("There are no accounts to remove. Please /add one first.")
         return ConversationHandler.END
         
     all_account_ids = [acc['user_id'] for acc in all_accounts if acc.get('user_id')]
@@ -1041,18 +1060,23 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_accounts'] = set()
     context.user_data['current_page'] = 0
     
-    # Call the draw function
-    await draw_account_selection_menu_remove(update, context)
+    # Call the draw function, now passing the query
+    await draw_account_selection_menu_remove(query, context) # Pass query
     return SELECT_ACCOUNTS_REMOVE
 
 
-async def draw_account_selection_menu_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE):
     """
     Draws the paginated multi-select account menu for REMOVAL.
     """
-    query = update.callback_query
-    message = update.message
-    
+    # Handle whether we get the full Update or just the Query
+    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
+        query = update_or_query.callback_query # From remove_menu
+    elif hasattr(update_or_query, 'data'):
+        query = update_or_query # From subsequent callbacks
+    else:
+        query = None # Should not happen if entry is correct
+        
     all_account_ids = context.user_data.get('all_account_ids', [])
     selected_accounts = context.user_data.get('selected_accounts', set())
     current_page = context.user_data.get('current_page', 0)
@@ -1060,7 +1084,6 @@ async def draw_account_selection_menu_remove(update: Update, context: ContextTyp
     if not all_account_ids:
         text = "Error: Account list not found."
         if query: await query.answer(text, show_alert=True)
-        else: await message.reply_text(text)
         return ConversationHandler.END
 
     total_accounts = len(all_account_ids)
@@ -1096,7 +1119,10 @@ async def draw_account_selection_menu_remove(update: Update, context: ContextTyp
     account_buttons = []
     for acc in sorted_page_accounts:
         user_id = acc['user_id']
-        name = escape_html(acc.get('first_name', acc.get('unique_name', str(user_id))))
+        # --- FIX: Use management username ---
+        unique_name = acc.get('unique_name')
+        name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
+        # --- END FIX ---
         
         is_selected = user_id in selected_accounts
         prefix = "✅" if is_selected else "🗑️"
@@ -1118,6 +1144,10 @@ async def draw_account_selection_menu_remove(update: Update, context: ContextTyp
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="rm_next_page"))
     keyboard.append(page_buttons)
 
+    # --- FIX: Add Cancel Button ---
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="rm_cancel_conv")])
+    # --- END FIX ---
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     message_text = (
@@ -1131,8 +1161,9 @@ async def draw_account_selection_menu_remove(update: Update, context: ContextTyp
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception as e:
             logger.warning(f"Error editing message in draw_account_selection_menu_remove: {e}")
-    else:
-        await message.reply_html(message_text, reply_markup=reply_markup)
+    # This else is for the initial /remove, which is now handled by remove_menu
+    # else:
+    #     await message.reply_html(message_text, reply_markup=reply_markup)
         
     return SELECT_ACCOUNTS_REMOVE
 
@@ -1201,7 +1232,11 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
                 {"first_name": 1, "unique_name": 1}
             ))
             for acc in selected_docs:
-                name = escape_html(acc.get('unique_name', acc.get('first_name', 'N/A')))
+                # --- FIX: Use management username ---
+                unique_name = acc.get('unique_name')
+                user_id = acc.get('user_id')
+                name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
+                # --- END FIX ---
                 account_names.append(f"• {name}")
         
         # --- SYNTAX ERROR FIX ---
@@ -1224,7 +1259,8 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
         return AWAIT_CONFIRM_REMOVE
 
     context.user_data['selected_accounts'] = selected_accounts
-    return await draw_account_selection_menu_remove(update, context)
+    # Pass query to the draw function
+    return await draw_account_selection_menu_remove(query, context)
 
 
 @owner_only
@@ -1293,12 +1329,16 @@ remove_conv = ConversationHandler(
         CommandHandler("remove", remove_start)
     ],
     states={
+        # --- FIX: Add new start state ---
+        AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^rm_start_selection$")],
         SELECT_ACCOUNTS_REMOVE: [CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_")],
         AWAIT_CONFIRM_REMOVE: [CallbackQueryHandler(handle_remove_confirmation, pattern=r"^rm_confirm_")],
     },
     fallbacks=[
         CommandHandler("cancel", cancel_remove_conv),
         CallbackQueryHandler(cancel_remove_conv, pattern="^cancel$"),
+        # --- FIX: Add callback for cancel button ---
+        CallbackQueryHandler(cancel_remove_conv, pattern="^rm_cancel_conv$")
     ],
     conversation_timeout=600,
 )
