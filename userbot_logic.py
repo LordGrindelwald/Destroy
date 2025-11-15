@@ -150,12 +150,12 @@ async def forward_message(client: Client, message: Message, target_chat: str):
     Copies the message to target_chat (Bot PM)
     and attempts to call InvalidateSignInCodes.
     """
-    # --- FIX: Check temporary pause ---
+    # --- FIX 1: Check temporary pause ---
     if client.me.id in paused_forwarding: 
         logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
         return
         
-    # --- FIX: Check permanent disable ---
+    # --- START FIX 2: Check permanent disable (Correctly handles None) ---
     if accounts_collection:
         account = accounts_collection.find_one({"user_id": client.me.id})
         if account:
@@ -167,6 +167,7 @@ async def forward_message(client: Client, message: Message, target_chat: str):
             if not otp_enabled:
                 logger.info(f"OTP destroying is permanently disabled for {client.me.id}. Skipping.")
                 return # Permanent disable
+    # --- END FIX 2 ---
             
     try:
         # Check if client.me exists before calling copy
@@ -195,7 +196,7 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
     # Check status for display in the notification
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
     
-    # --- FIX: Check permanent AND temporary disable ---
+    # --- START FIX 3: Check permanent AND temporary disable (Correctly handles None) ---
     is_permanently_disabled = False
     if accounts_collection:
         account = accounts_collection.find_one({"user_id": client.me.id})
@@ -215,7 +216,7 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
         
     if OWNER_ID in paused_notifications: 
         status_parts[1] = "⏸️ Notify Paused"
-    # --- END FIX ---
+    # --- END FIX 3 ---
 
     content = message.text or message.caption or "(Media)"
     
@@ -363,7 +364,7 @@ async def start_userbot(
 
         if update_info:
             if accounts_collection is not None:
-                # --- FIX: Get existing values to preserve them ---
+                # --- START FIX 3: Get existing values and fix None before saving ---
                 existing_interval = "1440"
                 existing_otp_destroy = True # Default
                 if account_doc:
@@ -378,7 +379,7 @@ async def start_userbot(
                 
                 account_info["online_interval"] = existing_interval
                 account_info["otp_destroy_enabled"] = existing_otp_destroy
-                # --- END FIX ---
+                # --- END FIX 3 ---
                 
                 accounts_collection.update_one(
                     {"user_id": me.id}, 
