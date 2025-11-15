@@ -119,7 +119,7 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     existing_with_name = accounts_collection.find_one({"unique_name": new_name})
     if existing_with_name and existing_with_name["_id"] != account["_id"]:
-        await update.message.reply_text(f"⚠️ The name Code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
     accounts_collection.update_one(
@@ -316,7 +316,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry_text = (
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
-                f"<b>Phone:</b> Code>{phone_str}</code>\n"
+                f"<b>Phone:</b> <code>{phone_str}</code>\n"
                 f"{escape_html(device_model)}"
                 f" ({escape_html(online_interval)} min)\n" 
                 f"<b>ID:</b> {user_id if user_id else 'N/A'}"
@@ -1173,9 +1173,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception as e:
             logger.warning(f"Error editing message in draw_account_selection_menu_remove: {e}")
-    # This else is for the initial /remove, which is now handled by remove_menu
-    # else:
-    //     await message.reply_html(message_text, reply_markup=reply_markup)
+    # --- FIX: Removed invalid comment and obsolete else block ---
         
     return SELECT_ACCOUNTS_REMOVE
 
