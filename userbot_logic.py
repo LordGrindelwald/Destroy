@@ -150,25 +150,11 @@ async def forward_message(client: Client, message: Message, target_chat: str):
     Copies the message to target_chat (Bot PM)
     and attempts to call InvalidateSignInCodes.
     """
-    # --- FIX 1: Check temporary pause ---
+    # --- THIS IS THE WORKING LOGIC FROM NEWEXAMPLE ---
     if client.me.id in paused_forwarding: 
         logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
         return
         
-    # --- START FIX 2: Check permanent disable (Correctly handles None) ---
-    if accounts_collection:
-        account = accounts_collection.find_one({"user_id": client.me.id})
-        if account:
-            # Check the flag, correctly handling None as True
-            otp_enabled = account.get("otp_destroy_enabled")
-            if otp_enabled is None:
-                otp_enabled = True # Default to True if missing or None
-            
-            if not otp_enabled:
-                logger.info(f"OTP destroying is permanently disabled for {client.me.id}. Skipping.")
-                return # Permanent disable
-    # --- END FIX 2 ---
-            
     try:
         # Check if client.me exists before calling copy
         if client.me:
@@ -196,27 +182,13 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
     # Check status for display in the notification
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
     
-    # --- START FIX 3: Check permanent AND temporary disable (Correctly handles None) ---
-    is_permanently_disabled = False
-    if accounts_collection:
-        account = accounts_collection.find_one({"user_id": client.me.id})
-        if account:
-            # Check the flag, correctly handling None as True
-            otp_enabled = account.get("otp_destroy_enabled")
-            if otp_enabled is None:
-                otp_enabled = True # Default to True
-                
-            if not otp_enabled:
-                is_permanently_disabled = True
-
+    # --- THIS IS THE WORKING LOGIC FROM NEWEXAMPLE ---
     if client.me.id in paused_forwarding: 
         status_parts[0] = "⏸️ OTP Paused (Temp)"
-    elif is_permanently_disabled:
-        status_parts[0] = "❌ OTP Disabled (Perm)"
         
     if OWNER_ID in paused_notifications: 
         status_parts[1] = "⏸️ Notify Paused"
-    # --- END FIX 3 ---
+    # --- END ---
 
     content = message.text or message.caption or "(Media)"
     
@@ -364,7 +336,7 @@ async def start_userbot(
 
         if update_info:
             if accounts_collection is not None:
-                # --- START FIX 3: Get existing values and fix None before saving ---
+                # --- FIX: Get existing values and fix None before saving ---
                 existing_interval = "1440"
                 existing_otp_destroy = True # Default
                 if account_doc:
@@ -378,8 +350,9 @@ async def start_userbot(
                         existing_otp_destroy = otp_flag_val
                 
                 account_info["online_interval"] = existing_interval
+                # We still save the flag, but it's no longer used by forward_message
                 account_info["otp_destroy_enabled"] = existing_otp_destroy
-                # --- END FIX 3 ---
+                # --- END FIX ---
                 
                 accounts_collection.update_one(
                     {"user_id": me.id}, 
