@@ -37,7 +37,20 @@ try:
     db = client.userbot_manager
     config_collection = db.config
     accounts_collection = db.accounts
-    logger.info("Successfully connected to MongoDB and verified connection.")
+    
+    # --- FIX: Ensure database indexes to prevent duplicates ---
+    try:
+        # Create a unique index on user_id
+        accounts_collection.create_index("user_id", unique=True)
+        # Create a "sparse" unique index on unique_name.
+        # This allows multiple documents to NOT have a unique_name (value=None),
+        # but prevents two documents from having the SAME unique_name.
+        accounts_collection.create_index("unique_name", unique=True, sparse=True)
+        logger.info("Successfully connected to MongoDB and verified/created indexes.")
+    except Exception as e:
+        logger.warning(f"Could not create/verify indexes (this may happen on read-only DBs or if duplicates already exist): {e}")
+    # --- END FIX ---
+
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
     client = None

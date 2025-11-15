@@ -21,7 +21,8 @@ from session_generator import gen_conv # Import generate flow
 from bot_handlers import (
     start_command, settings_command, add_command, remove_command,
     status_command, temp_pause_command, temp_pause_all, ping_command,
-    refresh_command, cancel_command, set_unique_name_command,
+    refresh_command, cancel_command, rename_command, # <-- FIX: Renamed
+    deduplicate_db_command, # <-- NEW: Import dedupe command
     accounts_menu, execute_remove_account, set_next_step,
     pause_notifications_callback, handle_text_input,
     paste_single_conv, accounts_command, restart_command,
@@ -78,7 +79,7 @@ def main() -> None:
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("remove", remove_command))
-    application.add_handler(CommandHandler("xadd", set_unique_name_command))
+    application.add_handler(CommandHandler("rename", rename_command)) # <-- FIX: Renamed
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("temp", temp_pause_command))
     application.add_handler(CommandHandler("temp_fwd", temp_pause_all))
@@ -87,6 +88,7 @@ def main() -> None:
     application.add_handler(CommandHandler("accs", accounts_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("restart", restart_command)) # NEW
+    application.add_handler(CommandHandler("deduplicate_db", deduplicate_db_command)) # <-- NEW: Add dedupe command
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers

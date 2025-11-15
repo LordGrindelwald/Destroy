@@ -3,6 +3,7 @@ import sys # Import sys for restart
 import math 
 from datetime import datetime
 from functools import partial
+from bson.objectid import ObjectId # <-- FIX: Import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
 from telegram.ext import (
     ContextTypes,
@@ -133,6 +134,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user_id_to_delete = account['user_id']
+        _id_to_delete = account['_id'] # <-- FIX: Get specific document ID
         
         # --- NEW: Stop online job ---
         stop_online_job(user_id_to_delete)
@@ -143,7 +145,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await active_userbots[user_id_to_delete].stop()
             del active_userbots[user_id_to_delete]
             
-        result = accounts_collection.delete_one({"user_id": user_id_to_delete})
+        result = accounts_collection.delete_one({"_id": _id_to_delete}) # <-- FIX: Delete by _id
         
         if result.deleted_count > 0:
             await update.message.reply_text(f"✅ Account <code>{user_id_to_delete}</code> (<code>{escape_html(account.get('unique_name', 'N/A'))}</code>) has been successfully removed.", parse_mode=ParseMode.HTML)
@@ -162,6 +164,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = []
         for acc in accounts:
+            _id_str = str(acc.get('_id')) # <-- FIX: Get string of _id
             user_id = acc.get('user_id')
             name = escape_html(acc.get('first_name', f"ID: {user_id}"))
             unique_name = acc.get('unique_name')
@@ -169,22 +172,22 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if unique_name:
                 display_name += f" ({escape_html(unique_name)})"
             
-            button = [InlineKeyboardButton(display_name, callback_data=f"delete_account_{user_id}")]
+            button = [InlineKeyboardButton(display_name, callback_data=f"delete_account_{_id_str}")] # <-- FIX: Use _id string
             keyboard.append(button)
         keyboard.append([InlineKeyboardButton("« Back to Settings", callback_data="main_settings")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_html("Please select an account to remove:", reply_markup=reply_markup)
 
 @owner_only
-async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /xadd <identifier> <new_name>"""
+async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE): # <-- FIX: Renamed function
+    """Handles /rename <identifier> <new_name>""" # <-- FIX: Updated docstring
     
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
         return
 
     if len(context.args) != 2:
-        await update.message.reply_text("Usage: /xadd <user_id_or_name> <new_unique_name>")
+        await update.message.reply_text("Usage: /rename <user_id_or_name> <new_unique_name>") # <-- FIX: Updated usage text
         return
         
     identifier = context.args[0]
@@ -197,7 +200,7 @@ async def set_unique_name_command(update: Update, context: ContextTypes.DEFAULT_
 
     existing_with_name = accounts_collection.find_one({"unique_name": new_name})
     if existing_with_name and existing_with_name["user_id"] != account["user_id"]:
-        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"⚠️ The name C{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
     accounts_collection.update_one(
@@ -465,23 +468,42 @@ async def execute_remove_account(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return
         
-    user_id_to_delete = int(query.data.split("_")[2])
+    # --- FIX: Delete by _id ---
+    _id_str_to_delete = query.data.split("_")[2]
+    
+    try:
+        _id_to_delete = ObjectId(_id_str_to_delete)
+    except Exception:
+        await query.edit_message_text("Error: Invalid account ID format.")
+        return
+
+    account = accounts_collection.find_one({"_id": _id_to_delete})
+    if not account:
+        await query.edit_message_text(f"Error: Account not found in database (it may have been already removed).")
+        # Go back to settings menu
+        await asyncio.sleep(3)
+        await settings_command(update, context)
+        return
+        
+    user_id_to_delete = account.get('user_id')
+    # --- END FIX ---
     
     # --- NEW: Stop online job ---
-    stop_online_job(user_id_to_delete)
+    if user_id_to_delete: # Only stop if we have a valid user_id
+        stop_online_job(user_id_to_delete)
     # --- End ---
     
-    if user_id_to_delete in active_userbots:
+    if user_id_to_delete and user_id_to_delete in active_userbots:
         logger.info(f"Stopping userbot client for user ID {user_id_to_delete}")
         await active_userbots[user_id_to_delete].stop()
         del active_userbots[user_id_to_delete]
         
-    result = accounts_collection.delete_one({"user_id": user_id_to_delete})
+    result = accounts_collection.delete_one({"_id": _id_to_delete}) # <-- FIX: Delete by _id
     
     if result.deleted_count > 0:
-        await query.edit_message_text(f"✅ Account <code>{user_id_to_delete}</code> has been successfully removed.", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(f"✅ Account <code>{user_id_to_delete or 'N/A'}</code> has been successfully removed.", parse_mode=ParseMode.HTML)
     else:
-        await query.edit_message_text(f"⚠️ Could not find account <code>{user_id_to_delete}</code> in the database.", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(f"⚠️ Account <code>{user_id_to_delete or 'N/A'}</code> was not found in the database (it may have been already removed).", parse_mode=ParseMode.HTML)
         
     await asyncio.sleep(3)
     await settings_command(update, context) 
@@ -976,3 +998,112 @@ online_interval_conv = ConversationHandler(
     ],
     conversation_timeout=600,
 )
+
+# --- NEW: DATABASE CLEANUP COMMAND ---
+
+@owner_only
+async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Finds and removes duplicate account entries from the database.
+    Keeps the *first* entry found for each duplicate group and deletes the rest.
+    """
+    msg = await update.message.reply_text("🔄 Stopping all accounts before deduplication...")
+    
+    if accounts_collection is None:
+        await msg.edit_text("⚠️ Database connection is not available. Please check logs.")
+        return
+
+    # 1. Stop all running jobs
+    logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
+    for user_id in list(active_online_jobs.keys()):
+        stop_online_job(user_id)
+    
+    # 2. Stop all running clients
+    if active_userbots:
+        logger.info(f"Stopping {len(active_userbots)} userbot clients...")
+        stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
+        await asyncio.gather(*stop_tasks, return_exceptions=True)
+        active_userbots.clear()
+    
+    await msg.edit_text("Bots stopped. 🤖 Now searching for duplicates...")
+    
+    total_deleted = 0
+    
+    try:
+        # --- 3. Fix user_id duplicates ---
+        pipeline_uid = [
+            {
+                '$group': {
+                    '_id': '$user_id', 
+                    'count': {'$sum': 1}, 
+                    'ids': {'$push': '$_id'}
+                }
+            }, 
+            {
+                '$match': {
+                    'count': {'$gt': 1}
+                }
+            }
+        ]
+        duplicates_uid = list(accounts_collection.aggregate(pipeline_uid))
+        
+        uid_deleted_count = 0
+        if duplicates_uid:
+            await msg.edit_text(f"Found {len(duplicates_uid)} user_id duplicate groups. Removing extras...")
+            for group in duplicates_uid:
+                # Keep the first ID in the list, delete the rest
+                ids_to_delete = group['ids'][1:]
+                result = accounts_collection.delete_many({"_id": {"$in": ids_to_delete}})
+                uid_deleted_count += result.deleted_count
+            total_deleted += uid_deleted_count
+            
+        # --- 4. Fix unique_name duplicates ---
+        # Find documents where unique_name is not null
+        pipeline_name = [
+            {
+                '$match': {
+                    'unique_name': {'$ne': None}
+                }
+            },
+            {
+                '$group': {
+                    '_id': '$unique_name', 
+                    'count': {'$sum': 1}, 
+                    'ids': {'$push': '$_id'}
+                }
+            }, 
+            {
+                '$match': {
+                    'count': {'$gt': 1}
+                }
+            }
+        ]
+        duplicates_name = list(accounts_collection.aggregate(pipeline_name))
+        
+        name_deleted_count = 0
+        if duplicates_name:
+            await msg.edit_text(f"Removed {uid_deleted_count} user_id duplicates.\nFound {len(duplicates_name)} unique_name duplicate groups. Removing extras...")
+            for group in duplicates_name:
+                # Keep the first ID, delete the rest
+                ids_to_delete = group['ids'][1:]
+                result = accounts_collection.delete_many({"_id": {"$in": ids_to_delete}})
+                name_deleted_count += result.deleted_count
+            total_deleted += name_deleted_count
+
+        # --- 5. Report ---
+        final_message = (
+            f"✅ **Deduplication Complete**\n"
+            f"Removed {uid_deleted_count} duplicates by user_id.\n"
+            f"Removed {name_deleted_count} duplicates by unique_name.\n"
+            f"**Total documents deleted: {total_deleted}**"
+        )
+        await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+        
+        await update.message.reply_html(
+            "Database is now clean.\n\n"
+            "Please run /restart now to reload the bot and apply the new database indexes."
+        )
+
+    except Exception as e:
+        logger.error(f"Error during deduplication: {e}")
+        await msg.edit_text(f"An error occurred: {e}")
