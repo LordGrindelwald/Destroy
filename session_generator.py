@@ -26,9 +26,35 @@ from userbot_logic import start_userbot # To add the account after selection
 
 @owner_only
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point for session generation. Asks for unique name."""
+    """
+    Entry point for session generation.
+    Acts as a router for /add (phone flow) and /add -sess (session paste menu).
+    """
     message = update.message or update.callback_query.message
     
+    # --- FIX: Route /add vs /add -sess ---
+    is_callback = update.callback_query is not None
+    if not is_callback and context.args and context.args[0] == '-sess':
+        # User wants /add -sess
+        # This is NOT part of the conversation, just show buttons
+        context.user_data.clear()
+        keyboard = [
+            [InlineKeyboardButton("📝 Paste Single String", callback_data="add_single")],
+            [InlineKeyboardButton("📋 Paste Multiple Strings", callback_data="add_multiple")],
+            [InlineKeyboardButton("« Back to Settings", callback_data="main_settings")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        message_text = (
+            "➕  <b>Add a New Account (Session)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Please choose a method to add a new userbot account via session string."
+        )
+        await message.reply_html(message_text, reply_markup=reply_markup)
+        return ConversationHandler.END # End this conversation
+    # --- END FIX ---
+
+    # Default to phone flow (/add or callback)
     if update.callback_query:
         await update.callback_query.answer()
         
@@ -191,8 +217,8 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 gen_conv = ConversationHandler(
     entry_points=[
-        CommandHandler("generate", generate_command), 
-        CallbackQueryHandler(generate_command, pattern="^call_generate$")
+        CommandHandler("add", generate_command), # <-- FIX: Changed from "generate"
+        CallbackQueryHandler(generate_command, pattern="^call_add_command$") # <-- FIX: Changed from "call_generate"
     ],
     states={
         UNIQUE_NAME_GEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_unique_name_for_generate)],

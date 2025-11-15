@@ -19,14 +19,15 @@ from config import (
 from userbot_logic import start_all_userbots_from_db
 from session_generator import gen_conv # Import generate flow
 from bot_handlers import (
-    start_command, settings_command, add_command, remove_command,
+    start_command, settings_command,
     status_command, temp_pause_command, temp_pause_all, ping_command,
-    refresh_command, cancel_command, rename_command, # <-- FIX: Renamed
-    deduplicate_db_command, # <-- NEW: Import dedupe command
-    accounts_menu, execute_remove_account, set_next_step,
+    refresh_command, cancel_command, rename_command,
+    deduplicate_db_command,
+    accounts_menu, set_next_step,
     pause_notifications_callback, handle_text_input,
     paste_single_conv, accounts_command, restart_command,
-    online_interval_conv # <-- Import the conversation handler
+    online_interval_conv, remove_conv, # <-- NEW: Import remove_conv
+    account_detail_command, toggle_otp_destroy_command # <-- NEW: Import new commands
 )
 
 # --- New dummy function for silent command ---
@@ -70,25 +71,28 @@ def main() -> None:
     # --- Register Handlers ---
     
     # 1. Conversation Handlers
-    application.add_handler(gen_conv, group=0)
+    application.add_handler(gen_conv, group=0) # <-- Handles /add
     application.add_handler(paste_single_conv, group=0)
-    application.add_handler(online_interval_conv, group=0) # <-- ADDED
+    application.add_handler(online_interval_conv, group=0)
+    application.add_handler(remove_conv, group=0) # <-- NEW: Handles /remove
 
     # 2. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CommandHandler("add", add_command))
-    application.add_handler(CommandHandler("remove", remove_command))
-    application.add_handler(CommandHandler("rename", rename_command)) # <-- FIX: Renamed
+    # /add is now in gen_conv
+    # /remove is now in remove_conv
+    application.add_handler(CommandHandler("rename", rename_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("temp", temp_pause_command))
     application.add_handler(CommandHandler("temp_fwd", temp_pause_all))
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
-    application.add_handler(CommandHandler("accs", accounts_command))
+    application.add_handler(CommandHandler("accs", accounts_command)) # <-- NEW: Handles /accs and /accs -de
+    application.add_handler(CommandHandler("acc", account_detail_command)) # <-- NEW: Handles /acc <name>
+    application.add_handler(CommandHandler("toggle_otp_destroy", toggle_otp_destroy_command)) # <-- NEW
     application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(CommandHandler("restart", restart_command)) # NEW
-    application.add_handler(CommandHandler("deduplicate_db", deduplicate_db_command)) # <-- NEW: Add dedupe command
+    application.add_handler(CommandHandler("restart", restart_command))
+    application.add_handler(CommandHandler("deduplicate_db", deduplicate_db_command))
     application.add_handler(CommandHandler("init_abc", do_nothing))
     
     # 3. CallbackQuery Handlers
@@ -98,11 +102,11 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(partial(set_next_step, step='awaiting_multiple_accounts', text="Please paste all session strings, separated by a space or new line."), pattern="^add_multiple$"))
     
     # Navigation/Action callbacks
-    application.add_handler(CallbackQueryHandler(restart_command, pattern="^call_restart$")) # NEW: Button action for restart
+    application.add_handler(CallbackQueryHandler(restart_command, pattern="^call_restart$"))
     application.add_handler(CallbackQueryHandler(settings_command, pattern="^main_settings$"))
-    application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$"))
+    # application.add_handler(CallbackQueryHandler(add_command, pattern="^call_add_command$")) # <-- REMOVED (now in gen_conv)
     application.add_handler(CallbackQueryHandler(accounts_menu, pattern="^manage_accounts$"))
-    application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_"))
+    # application.add_handler(CallbackQueryHandler(execute_remove_account, pattern=r"^delete_account_")) # <-- REMOVED (now in remove_conv)
     
     # 4. Message Handler (must be low priority)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input), group=1)
