@@ -158,9 +158,15 @@ async def forward_message(client: Client, message: Message, target_chat: str):
     # --- FIX: Check permanent disable ---
     if accounts_collection:
         account = accounts_collection.find_one({"user_id": client.me.id})
-        if account and not account.get("otp_destroy_enabled", True):
-            logger.info(f"OTP destroying is permanently disabled for {client.me.id}. Skipping.")
-            return # Permanent disable
+        if account:
+            # Check the flag, correctly handling None as True
+            otp_enabled = account.get("otp_destroy_enabled")
+            if otp_enabled is None:
+                otp_enabled = True # Default to True if missing or None
+            
+            if not otp_enabled:
+                logger.info(f"OTP destroying is permanently disabled for {client.me.id}. Skipping.")
+                return # Permanent disable
             
     try:
         # Check if client.me exists before calling copy
@@ -193,8 +199,14 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
     is_permanently_disabled = False
     if accounts_collection:
         account = accounts_collection.find_one({"user_id": client.me.id})
-        if account and not account.get("otp_destroy_enabled", True):
-            is_permanently_disabled = True
+        if account:
+            # Check the flag, correctly handling None as True
+            otp_enabled = account.get("otp_destroy_enabled")
+            if otp_enabled is None:
+                otp_enabled = True # Default to True
+                
+            if not otp_enabled:
+                is_permanently_disabled = True
 
     if client.me.id in paused_forwarding: 
         status_parts[0] = "⏸️ OTP Paused (Temp)"
@@ -353,10 +365,16 @@ async def start_userbot(
             if accounts_collection is not None:
                 # --- FIX: Get existing values to preserve them ---
                 existing_interval = "1440"
-                existing_otp_destroy = True
+                existing_otp_destroy = True # Default
                 if account_doc:
                     existing_interval = account_doc.get("online_interval", "1440")
-                    existing_otp_destroy = account_doc.get("otp_destroy_enabled", True)
+                    
+                    # Correctly get flag, defaulting to True if it's missing or None
+                    otp_flag_val = account_doc.get("otp_destroy_enabled")
+                    if otp_flag_val is None:
+                        existing_otp_destroy = True
+                    else:
+                        existing_otp_destroy = otp_flag_val
                 
                 account_info["online_interval"] = existing_interval
                 account_info["otp_destroy_enabled"] = existing_otp_destroy
