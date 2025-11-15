@@ -38,10 +38,10 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # User wants /add -sess
         # This is NOT part of the conversation, just show buttons
         context.user_data.clear()
+        # --- FIX: Removed "Back to Settings" button ---
         keyboard = [
             [InlineKeyboardButton("📝 Paste Single String", callback_data="add_single")],
             [InlineKeyboardButton("📋 Paste Multiple Strings", callback_data="add_multiple")],
-            [InlineKeyboardButton("« Back to Settings", callback_data="main_settings")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -212,7 +212,19 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
         client = context.user_data.get('temp_client')
         if client and client.is_connected: await client.disconnect()
     context.user_data.clear()
-    await update.message.reply_text("Action cancelled.")
+    
+    # --- FIX: Edit message on cancel ---
+    cancel_text = "✖️ Add account process cancelled."
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(cancel_text)
+        except Exception:
+            await update.callback_query.message.reply_text(cancel_text)
+    else:
+        await update.message.reply_text(cancel_text)
+    # --- END FIX ---
+    
     return ConversationHandler.END
 
 gen_conv = ConversationHandler(

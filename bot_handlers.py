@@ -414,7 +414,8 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
 
-    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data="main_settings")]]
+    # --- FIX: Removed "Back to Settings" button ---
+    keyboard = []
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(
@@ -674,6 +675,10 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="oi_next_page"))
     keyboard.append(page_buttons)
 
+    # --- FIX: Add Cancel Button ---
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="oi_cancel_conv")])
+    # --- END FIX ---
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     message_text = (
@@ -884,14 +889,17 @@ async def cancel_interval_conv(update: Update, context: ContextTypes.DEFAULT_TYP
     """Cancels the interval selection conversation."""
     context.user_data.clear()
     
+    # --- FIX: Edit message on cancel ---
     if update.callback_query:
         await update.callback_query.answer()
         try:
-            await update.callback_query.edit_message_text("Action cancelled.")
+            await update.callback_query.edit_message_text("✖️ Online interval process cancelled.")
         except Exception:
-            await update.callback_query.message.reply_text("Action cancelled.")
+            # Fallback if editing fails
+            await update.callback_query.message.reply_text("✖️ Online interval process cancelled.")
     else:
-        await update.message.reply_text("Action cancelled.")
+        await update.message.reply_text("✖️ Online interval process cancelled.")
+    # --- END FIX ---
             
     return ConversationHandler.END
 
@@ -912,7 +920,8 @@ online_interval_conv = ConversationHandler(
     fallbacks=[
         CommandHandler("cancel", cancel_interval_conv),
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$"),
-        CommandHandler("online_interval", online_interval_start) # Restart command as fallback
+        # --- FIX: Add specific cancel button handler ---
+        CallbackQueryHandler(cancel_interval_conv, pattern="^oi_cancel_conv$")
     ],
     conversation_timeout=600,
 )
@@ -1229,7 +1238,7 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
         if accounts_collection:
             selected_docs = list(accounts_collection.find(
                 {"user_id": {"$in": list(selected_accounts)}},
-                {"first_name": 1, "unique_name": 1}
+                {"first_name": 1, "unique_name": 1, "user_id": 1}
             ))
             for acc in selected_docs:
                 # --- FIX: Use management username ---
@@ -1270,7 +1279,7 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     
     if query.data == "rm_confirm_no":
-        await query.edit_message_text("Action cancelled.")
+        await query.edit_message_text("✖️ Remove process cancelled.")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -1283,8 +1292,15 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         
     await query.edit_message_text(f"🔄 Removing {len(selected_accounts)} accounts. Please wait...")
     
-    deleted_count = 0
+    removed_accounts_display = []
+    
     for user_id in selected_accounts:
+        # --- FIX: Get account doc before deleting ---
+        account = None
+        if accounts_collection:
+            account = accounts_collection.find_one({"user_id": user_id})
+        # --- END FIX ---
+        
         # 1. Stop online job
         stop_online_job(user_id)
         
@@ -1297,11 +1313,18 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
             del active_userbots[user_id]
             
         # 3. Delete from DB
-        if accounts_collection:
-            result = accounts_collection.delete_one({"user_id": user_id})
-            deleted_count += result.deleted_count
+        if account:
+            result = accounts_collection.delete_one({"_id": account["_id"]})
+            if result.deleted_count > 0:
+                name = escape_html(account.get('unique_name') or f"ID: {user_id}")
+                removed_accounts_display.append(f"☑️ {name} removed.")
+        # --- END FIX ---
             
-    await query.edit_message_text(f"✅ Successfully removed {deleted_count} account(s) from the database.")
+    final_message = "\n".join(removed_accounts_display)
+    if not final_message:
+        final_message = "No accounts were removed."
+        
+    await query.edit_message_text(final_message)
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1311,14 +1334,16 @@ async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Cancels the remove selection conversation."""
     context.user_data.clear()
     
+    # --- FIX: Edit message on cancel ---
     if update.callback_query:
         await update.callback_query.answer()
         try:
-            await update.callback_query.edit_message_text("Action cancelled.")
+            await update.callback_query.edit_message_text("✖️ Remove process cancelled.")
         except Exception:
-            await update.callback_query.message.reply_text("Action cancelled.")
+            await update.callback_query.message.reply_text("✖️ Remove process cancelled.")
     else:
-        await update.message.reply_text("Action cancelled.")
+        await update.message.reply_text("✖️ Remove process cancelled.")
+    # --- END FIX ---
             
     return ConversationHandler.END
 
