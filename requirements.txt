@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]
+pyroblack
+tgcrypto
+pymongo[srv]
+python-dotenv
