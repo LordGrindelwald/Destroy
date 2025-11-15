@@ -952,7 +952,7 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
     
     # OTP Destroying (Permanent Flag)
     otp_destroy_enabled = account.get("otp_destroy_enabled", True)
-    otp_destroy_status = "💥💣🔢 active" if otp_destroy_enabled else "DISABLE"
+    otp_destroy_status = "💥💣🔢 active" if otp_destroy_enabled else "❌ DISABLED"
     
     # OTP Destroying (Temporary Pause)
     if otp_destroy_enabled and user_id in paused_forwarding:
@@ -1204,12 +1204,16 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
                 name = escape_html(acc.get('unique_name', acc.get('first_name', 'N/A')))
                 account_names.append(f"• {name}")
         
+        # --- SYNTAX ERROR FIX ---
+        names_list_str = '\n'.join(account_names) # Create string first
         text = (
             f"<b>FINAL CONFIRMATION</b>\n\n"
             f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
-            f"{'\n'.join(account_names)}\n\n"
+            f"{names_list_str}\n\n" # Use variable
             "This action is <b>IRREVERSIBLE</b>."
         )
+        # --- END FIX ---
+
         keyboard = [
             [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="rm_confirm_yes")],
             [InlineKeyboardButton("❌ No, Cancel", callback_data="rm_confirm_no")]
