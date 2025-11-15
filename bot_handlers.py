@@ -119,7 +119,7 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     existing_with_name = accounts_collection.find_one({"unique_name": new_name})
     if existing_with_name and existing_with_name["_id"] != account["_id"]:
-        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"⚠️ The name Code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
         
     accounts_collection.update_one(
@@ -316,7 +316,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry_text = (
                 f"{name_display}\n"
                 f"<b>User:</b> {username_str}\n"
-                f"<b>Phone:</b> <code>{phone_str}</code>\n"
+                f"<b>Phone:</b> Code>{phone_str}</code>\n"
                 f"{escape_html(device_model)}"
                 f" ({escape_html(online_interval)} min)\n" 
                 f"<b>ID:</b> {user_id if user_id else 'N/A'}"
@@ -676,7 +676,8 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
     keyboard.append(page_buttons)
 
     # --- FIX: Add Cancel Button ---
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="oi_cancel_conv")])
+    # --- BUGFIX: Changed callback_data to not conflict with state pattern ---
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_oi_conv")])
     # --- END FIX ---
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -921,7 +922,8 @@ online_interval_conv = ConversationHandler(
         CommandHandler("cancel", cancel_interval_conv),
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$"),
         # --- FIX: Add specific cancel button handler ---
-        CallbackQueryHandler(cancel_interval_conv, pattern="^oi_cancel_conv$")
+        # --- BUGFIX: Changed pattern to not conflict with state ---
+        CallbackQueryHandler(cancel_interval_conv, pattern="^cancel_oi_conv$")
     ],
     conversation_timeout=600,
 )
@@ -1154,7 +1156,8 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     keyboard.append(page_buttons)
 
     # --- FIX: Add Cancel Button ---
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="rm_cancel_conv")])
+    # --- BUGFIX: Changed callback_data to not conflict with state pattern ---
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_rm_conv")])
     # --- END FIX ---
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1172,7 +1175,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
             logger.warning(f"Error editing message in draw_account_selection_menu_remove: {e}")
     # This else is for the initial /remove, which is now handled by remove_menu
     # else:
-    #     await message.reply_html(message_text, reply_markup=reply_markup)
+    //     await message.reply_html(message_text, reply_markup=reply_markup)
         
     return SELECT_ACCOUNTS_REMOVE
 
@@ -1363,7 +1366,8 @@ remove_conv = ConversationHandler(
         CommandHandler("cancel", cancel_remove_conv),
         CallbackQueryHandler(cancel_remove_conv, pattern="^cancel$"),
         # --- FIX: Add callback for cancel button ---
-        CallbackQueryHandler(cancel_remove_conv, pattern="^rm_cancel_conv$")
+        # --- BUGFIX: Changed pattern to not conflict with state ---
+        CallbackQueryHandler(cancel_remove_conv, pattern="^cancel_rm_conv$")
     ],
     conversation_timeout=600,
 )
