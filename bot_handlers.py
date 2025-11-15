@@ -23,14 +23,18 @@ from config import (
     AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL,
     AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE # <-- NEW STATES
 )
-from utils import owner_only, escape_html, clean_session_string, get_account_from_arg, generate_device_name
+# --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
+from utils import (
+    owner_only, escape_html, clean_session_string, 
+    get_account_from_arg, generate_device_name, COMMAND_FALLBACKS
+)
 from userbot_logic import (
     start_userbot, start_all_userbots_from_db,
     stop_online_job, schedule_online_job, active_online_jobs
 )
 from jobs import resume_forwarding_job, resume_all_job
-# FIX: Import generate_command from session_generator
-from session_generator import cancel_command_conv, generate_command
+# --- BUGFIX: Only import generate_command, not cancel_command_conv ---
+from session_generator import generate_command
 
 # --- Constants ---
 ACCOUNTS_PER_PAGE = 16 # 8 rows * 2 columns
@@ -507,6 +511,17 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
     await asyncio.sleep(3); await settings_command(update, context)
 
+
+# --- BUGFIX: New self-contained cancel function ---
+@owner_only
+async def cancel_paste_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the paste string conversation."""
+    context.user_data.clear()
+    if update.message:
+        await update.message.reply_text("✖️ Paste account process cancelled.")
+    return ConversationHandler.END
+# --- END BUGFIX ---
+
 # --- NEW Paste Single String Conversation Handler ---
 
 @owner_only
@@ -576,7 +591,10 @@ paste_single_conv = ConversationHandler(
         UNIQUE_NAME_PASTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_unique_name_for_paste)],
         AWAIT_STRING_PASTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_session_string_and_add)],
     },
-    fallbacks=[CommandHandler("cancel", cancel_command_conv)],
+    fallbacks=[
+        CommandHandler("cancel", cancel_paste_conv), # <-- BUGFIX
+        *COMMAND_FALLBACKS # <-- BUGFIX
+    ],
     conversation_timeout=300,
 )
 
@@ -922,8 +940,8 @@ online_interval_conv = ConversationHandler(
         CommandHandler("cancel", cancel_interval_conv),
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$"),
         # --- FIX: Add specific cancel button handler ---
-        # --- BUGFIX: Changed pattern to not conflict with state ---
-        CallbackQueryHandler(cancel_interval_conv, pattern="^cancel_oi_conv$")
+        CallbackQueryHandler(cancel_interval_conv, pattern="^cancel_oi_conv$"),
+        *COMMAND_FALLBACKS # <-- BUGFIX
     ],
     conversation_timeout=600,
 )
@@ -1364,8 +1382,8 @@ remove_conv = ConversationHandler(
         CommandHandler("cancel", cancel_remove_conv),
         CallbackQueryHandler(cancel_remove_conv, pattern="^cancel$"),
         # --- FIX: Add callback for cancel button ---
-        # --- BUGFIX: Changed pattern to not conflict with state ---
-        CallbackQueryHandler(cancel_remove_conv, pattern="^cancel_rm_conv$")
+        CallbackQueryHandler(cancel_remove_conv, pattern="^cancel_rm_conv$"),
+        *COMMAND_FALLBACKS # <-- BUGFIX
     ],
     conversation_timeout=600,
 )

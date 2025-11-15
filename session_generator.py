@@ -21,7 +21,10 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-from utils import owner_only, generate_device_name, escape_html
+# --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
+from utils import (
+    owner_only, generate_device_name, escape_html, COMMAND_FALLBACKS
+)
 from userbot_logic import start_userbot # To add the account after selection
 
 @owner_only
@@ -238,6 +241,9 @@ gen_conv = ConversationHandler(
         CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_login_code)],
         PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_2fa_password)],
     },
-    fallbacks=[CommandHandler("cancel", cancel_command_conv)],
+    fallbacks=[
+        CommandHandler("cancel", cancel_command_conv),
+        *COMMAND_FALLBACKS # <-- BUGFIX
+    ],
     conversation_timeout=300,
 )

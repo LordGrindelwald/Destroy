@@ -3,9 +3,9 @@ import random
 import os
 from functools import wraps
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler, CommandHandler
 
-# Import OWNER_ID and accounts_collection from config
+# Import from config
 from config import OWNER_ID, accounts_collection, logger
 
 # --- NEW FUNCTION ---
@@ -108,3 +108,37 @@ async def get_account_from_arg(arg: str):
         account = accounts_collection.find_one({"unique_name": arg.lower()})
         
     return account
+
+
+# --- BUGFIX: Conversation Fallback ---
+async def end_conversation_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Generic fallback handler to end any active conversation
+    if a new command is received.
+    """
+    logger.info("New command received, ending active conversation.")
+    context.user_data.clear()
+    if update.message:
+        await update.message.reply_text("✖️ Previous action cancelled by new command. Please send your command again.")
+    return ConversationHandler.END
+
+# This list will be shared with session_generator.py
+COMMAND_FALLBACKS = [
+    CommandHandler("start", end_conversation_on_command),
+    CommandHandler("settings", end_conversation_on_command),
+    CommandHandler("add", end_conversation_on_command),
+    CommandHandler("remove", end_conversation_on_command),
+    CommandHandler("rename", end_conversation_on_command),
+    CommandHandler("status", end_conversation_on_command),
+    CommandHandler("temp", end_conversation_on_command),
+    CommandHandler("temp_fwd", end_conversation_on_command),
+    CommandHandler("ping", end_conversation_on_command),
+    CommandHandler("refresh", end_conversation_on_command),
+    CommandHandler("accs", end_conversation_on_command),
+    CommandHandler("acc", end_conversation_on_command),
+    CommandHandler("toggle_otp_destroy", end_conversation_on_command),
+    CommandHandler("restart", end_conversation_on_command),
+    CommandHandler("deduplicate_db", end_conversation_on_command),
+    CommandHandler("online_interval", end_conversation_on_command),
+]
+# --- END BUGFIX ---
