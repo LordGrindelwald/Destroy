@@ -1168,7 +1168,10 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="acct_rm_next_page")) # <-- CHANGED
     keyboard.append(page_buttons)
 
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="acct_rm_cancel")]) # <-- CHANGED
+    # --- BUG FIX ---
+    # Changed callback_data to not conflict with the state's regex pattern
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_rm_conv")]) # <-- CHANGED
+    # --- END BUG FIX ---
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1357,7 +1360,10 @@ remove_conv = ConversationHandler(
     fallbacks=[
         CommandHandler("cancel", cancel_remove_conv),
         CallbackQueryHandler(cancel_remove_conv, pattern="^cancel$"),
-        CallbackQueryHandler(cancel_remove_conv, pattern="^acct_rm_cancel$"), # <-- CHANGED
+        # --- BUG FIX ---
+        # Changed pattern to match the new button's callback_data
+        CallbackQueryHandler(cancel_remove_conv, pattern="^cancel_rm_conv$"), # <-- CHANGED
+        # --- END BUG FIX ---
         *COMMAND_FALLBACKS
     ],
     conversation_timeout=600,
