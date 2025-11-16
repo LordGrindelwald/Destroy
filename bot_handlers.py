@@ -1248,7 +1248,10 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
-    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="acct_rm_done_selecting")])
+    # --- START OF BUTTON FIX ---
+    # Renamed this callback_data to be unique and avoid any pattern conflicts
+    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="dnrm_done_select")])
+    # --- END OF BUTTON FIX ---
 
     page_buttons = []
     if current_page > 0:
@@ -1375,11 +1378,36 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
     elif data == "acct_rm_noop":
         return SELECT_ACCOUNTS_REMOVE
         
-    # Note: The "acct_rm_done_selecting" case is now handled by the separate
+    # Note: The "dnrm_done_select" case is now handled by the separate
     # handle_remove_done_selecting function, which is called first.
 
     context.user_data['selected_accounts'] = selected_accounts
     return await draw_account_selection_menu_remove(query, context)
+
+
+# --- START OF HANG FIX ---
+async def _delete_account_in_background(user_id, account_doc_id):
+    """Helper function to run the blocking DB deletion in the background."""
+    if accounts_collection is None:
+        logger.error(f"Background delete failed for {user_id}: DB not connected.")
+        return False
+        
+    try:
+        # Run the blocking DB call in a separate thread
+        result = await asyncio.to_thread(
+            accounts_collection.delete_one, 
+            {"_id": account_doc_id}
+        )
+        if result.deleted_count > 0:
+            logger.info(f"Background delete successful for user_id {user_id} (doc_id {account_doc_id}).")
+            return True
+        else:
+            logger.warning(f"Background delete for {user_id} (doc_id {account_doc_id}) removed 0 documents.")
+            return False
+    except Exception as e:
+        logger.error(f"Background delete failed for {user_id} (doc_id {account_doc_id}): {e}")
+        return False
+# --- END OF HANG FIX ---
 
 
 @owner_only
@@ -1400,48 +1428,45 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
-    await query.edit_message_text(f"🔄 Removing {len(selected_accounts)} accounts. Please wait...")
+    await query.edit_message_text(f"✅ Scheduling {len(selected_accounts)} accounts for removal. This is now instant.")
     
     removed_accounts_display = []
     
     for user_id in selected_accounts:
         account = None
         if accounts_collection:
-            # Run blocking DB calls in a thread
+            # We still need to fetch the account to get its _id,
+            # but this is a read operation (find_one) and should be fast.
             account = await asyncio.to_thread(
                 accounts_collection.find_one, 
-                {"user_id": user_id}
+                {"user_id": user_id},
+                {"_id": 1, "unique_name": 1} # Only fetch what we need
             )
         
+        # Stop any running online jobs
         stop_online_job(user_id)
         
+        # "Fire-and-forget" stop for the Pyrogram client
         if user_id in active_userbots:
-            # --- NEW "FIRE-AND-FORGET" FIX ---
             client_to_stop = active_userbots.pop(user_id) # Pop it immediately
-            
-            # Schedule the stop() call to run in the background.
-            # We DO NOT await it, so we can't get stuck.
-            # If it hangs, only that background task is affected.
             asyncio.create_task(client_to_stop.stop())
+            logger.info(f"Scheduled client {user_id} for background stop.")
             
-            logger.info(f"Scheduled client {user_id} for background stop. Proceeding with removal.")
-            # --- END: NEW "FIRE-AND-FORGET" FIX ---
-            
+        # --- START OF HANG FIX ---
+        # "Fire-and-forget" the database deletion
         if account:
-            # --- START: STUCK REMOVAL FIX (DB) ---
-            # Run the blocking DB call in a separate thread
-            result = await asyncio.to_thread(
-                accounts_collection.delete_one, 
-                {"_id": account["_id"]}
-            )
-            # --- END: STUCK REMOVAL FIX (DB) ---
-            if result.deleted_count > 0:
-                name = escape_html(account.get('unique_name') or f"ID: {user_id}")
-                removed_accounts_display.append(f"☑️ {name} removed.")
+            account_doc_id = account["_id"]
+            asyncio.create_task(_delete_account_in_background(user_id, account_doc_id))
+            
+            name = escape_html(account.get('unique_name') or f"ID: {user_id}")
+            removed_accounts_display.append(f"☑️ {name} scheduled for removal.")
+        else:
+            logger.warning(f"Could not find account doc for user_id {user_id} to schedule deletion.")
+        # --- END OF HANG FIX ---
             
     final_message = "\n".join(removed_accounts_display)
     if not final_message:
-        final_message = "No accounts were removed (or an error occurred)."
+        final_message = "No accounts were found to schedule for removal."
         
     await query.edit_message_text(final_message)
     context.user_data.clear()
@@ -1473,17 +1498,18 @@ remove_conv = ConversationHandler(
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^acct_rm_start$")],
         
-        # --- START: "DONE" BUTTON FIX ---
+        # --- START OF BUTTON FIX ---
         SELECT_ACCOUNTS_REMOVE: [
-            # This more-specific pattern MUST come first
-            CallbackQueryHandler(handle_remove_done_selecting, pattern="^acct_rm_done_selecting$"), 
-            # This handler is now more specific to avoid matching the one above
+            # This more-specific pattern MUST come first.
+            # It now looks for the unique name "dnrm_done_select"
+            CallbackQueryHandler(handle_remove_done_selecting, pattern="^dnrm_done_select$"), 
+            # This handler is for all other buttons, which share the "acct_rm_" prefix
             CallbackQueryHandler(
                 handle_account_selection_callback_remove, 
                 pattern=r"^(acct_rm_toggle_|acct_rm_select_all|acct_rm_unselect_all|acct_rm_select_page|acct_rm_unselect_page|acct_rm_next_page|acct_rm_prev_page|acct_rm_noop)"
             )
         ],
-        # --- END: "DONE" BUTTON FIX ---
+        # --- END OF BUTTON FIX ---
         
         AWAIT_CONFIRM_REMOVE: [CallbackQueryHandler(handle_remove_confirmation, pattern=r"^acct_rm_confirm_")],
     },
