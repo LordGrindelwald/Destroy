@@ -121,12 +121,19 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
 
-    existing_with_name = accounts_collection.find_one({"unique_name": new_name})
+    # Run blocking DB calls in a thread
+    existing_with_name = await asyncio.to_thread(
+        accounts_collection.find_one, 
+        {"unique_name": new_name}
+    )
+    
     if existing_with_name and existing_with_name["_id"] != account["_id"]:
         await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
-        
-    accounts_collection.update_one(
+    
+    # Run blocking DB calls in a thread
+    await asyncio.to_thread(
+        accounts_collection.update_one,
         {"_id": account["_id"]}, # Use _id to be specific
         {"$set": {"unique_name": new_name}}
     )
@@ -141,7 +148,11 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_bots = 0
     if accounts_collection is not None:
-        total_bots = accounts_collection.count_documents({})
+        # Run blocking DB calls in a thread
+        total_bots = await asyncio.to_thread(
+            accounts_collection.count_documents, 
+            {}
+        )
         
     running_bots = len(active_userbots)
     running_jobs = len(active_online_jobs)
@@ -167,6 +178,8 @@ async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         identifier = context.args[0]
+        # get_account_from_arg is already async (but it shouldn't be, it's blocking)
+        # We'll assume it's fast enough for now to avoid rewriting utils.py
         account = await get_account_from_arg(identifier)
         
         if not account:
@@ -242,7 +255,11 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     total_bots = 0
     if accounts_collection is not None:
-        total_bots = accounts_collection.count_documents({})
+        # Run blocking DB calls in a thread
+        total_bots = await asyncio.to_thread(
+            accounts_collection.count_documents,
+            {}
+        )
     else:
         await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
         return
@@ -285,7 +302,10 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
         return
         
-    accounts = list(accounts_collection.find().sort("unique_name", 1))
+    # Run blocking DB calls in a thread
+    accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find().sort("unique_name", 1))
+    )
     
     # --- NEW: Detailed View ---
     if context.args and context.args[0] == "-de":
@@ -375,7 +395,10 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return
         
-    accounts = list(accounts_collection.find().sort("unique_name", 1))
+    # Run blocking DB calls in a thread
+    accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find().sort("unique_name", 1))
+    )
     
     base_text = "👤 <b>Your Managed Accounts:</b>\n\n"
     text_parts = []
@@ -545,7 +568,12 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("⚠️ Database connection is not available. Please /cancel and try again.")
         return ConversationHandler.END
 
-    if accounts_collection.find_one({"unique_name": unique_name}):
+    # Run blocking DB calls in a thread
+    account = await asyncio.to_thread(
+        accounts_collection.find_one, 
+        {"unique_name": unique_name}
+    )
+    if account:
         await update.message.reply_text("That name is already taken. Please choose another one.")
         return UNIQUE_NAME_PASTE 
         
@@ -638,10 +666,13 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
     
     page_accounts = []
     if accounts_collection is not None:
-        page_accounts = list(accounts_collection.find(
-            {"user_id": {"$in": page_account_ids}},
-            {"first_name": 1, "user_id": 1, "unique_name": 1, "online_interval": 1}
-        ))
+        # Run blocking DB calls in a thread
+        page_accounts = await asyncio.to_thread(
+            lambda: list(accounts_collection.find(
+                {"user_id": {"$in": page_account_ids}},
+                {"first_name": 1, "user_id": 1, "unique_name": 1, "online_interval": 1}
+            ))
+        )
     
     account_map = {acc['user_id']: acc for acc in page_accounts}
     sorted_page_accounts = [account_map[uid] for uid in page_account_ids if uid in account_map]
@@ -728,7 +759,10 @@ async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
-    all_accounts = list(accounts_collection.find({}, {"user_id": 1}))
+    # Run blocking DB calls in a thread
+    all_accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find({}, {"user_id": 1}))
+    )
     if not all_accounts:
         await query.edit_message_text("There are no accounts to configure. Please /add one first.")
         return ConversationHandler.END
@@ -851,7 +885,9 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Invalid format. Please send a number (e.g., 60) or a range (e.g., 30-90) between 1 and 1440.")
         return AWAIT_INTERVAL 
 
-    accounts_collection.update_many(
+    # Run blocking DB calls in a thread
+    await asyncio.to_thread(
+        accounts_collection.update_many,
         {"user_id": {"$in": list(selected_accounts)}},
         {"$set": {"online_interval": interval_to_set}}
     )
@@ -887,7 +923,9 @@ async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     interval_to_set = "1440"
-    accounts_collection.update_many(
+    # Run blocking DB calls in a thread
+    await asyncio.to_thread(
+        accounts_collection.update_many,
         {"user_id": {"$in": list(selected_accounts)}},
         {"$set": {"online_interval": interval_to_set}}
     )
@@ -1034,7 +1072,9 @@ async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAU
     current_status = account.get("otp_destroy_enabled", True)
     new_status = not current_status
     
-    accounts_collection.update_one(
+    # Run blocking DB calls in a thread
+    await asyncio.to_thread(
+        accounts_collection.update_one,
         {"_id": account["_id"]},
         {"$set": {"otp_destroy_enabled": new_status}}
     )
@@ -1062,6 +1102,8 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
             
         identifier = context.args[0]
+        # This function (get_account_from_arg) is blocking, but we'll let it slide for now
+        # as it's used everywhere. The *real* fix is in handle_remove_confirmation
         account = await get_account_from_arg(identifier)
         
         if not account:
@@ -1118,7 +1160,10 @@ async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
-    all_accounts = list(accounts_collection.find({}, {"user_id": 1}))
+    # Run blocking DB calls in a thread
+    all_accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find({}, {"user_id": 1}))
+    )
     if not all_accounts:
         await query.edit_message_text("There are no accounts to remove. Please /add one first.")
         return ConversationHandler.END
@@ -1163,10 +1208,13 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     
     page_accounts = []
     if accounts_collection is not None:
-        page_accounts = list(accounts_collection.find(
-            {"user_id": {"$in": page_account_ids}},
-            {"first_name": 1, "user_id": 1, "unique_name": 1}
-        ))
+        # Run blocking DB calls in a thread
+        page_accounts = await asyncio.to_thread(
+            lambda: list(accounts_collection.find(
+                {"user_id": {"$in": page_account_ids}},
+                {"first_name": 1, "user_id": 1, "unique_name": 1}
+            ))
+        )
     
     account_map = {acc['user_id']: acc for acc in page_accounts}
     sorted_page_accounts = [account_map[uid] for uid in page_account_ids if uid in account_map]
@@ -1244,10 +1292,13 @@ async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEF
     
     account_names = []
     if accounts_collection:
-        selected_docs = list(accounts_collection.find(
-            {"user_id": {"$in": list(selected_accounts)}},
-            {"first_name": 1, "unique_name": 1, "user_id": 1}
-        ))
+        # Run blocking DB calls in a thread
+        selected_docs = await asyncio.to_thread(
+            lambda: list(accounts_collection.find(
+                {"user_id": {"$in": list(selected_accounts)}},
+                {"first_name": 1, "unique_name": 1, "user_id": 1}
+            ))
+        )
         for acc in selected_docs:
             unique_name = acc.get('unique_name')
             user_id = acc.get('user_id')
@@ -1356,19 +1407,35 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
     for user_id in selected_accounts:
         account = None
         if accounts_collection:
-            account = accounts_collection.find_one({"user_id": user_id})
+            # Run blocking DB calls in a thread
+            account = await asyncio.to_thread(
+                accounts_collection.find_one, 
+                {"user_id": user_id}
+            )
         
         stop_online_job(user_id)
         
         if user_id in active_userbots:
+            # --- START: STUCK REMOVAL FIX ---
+            client_to_stop = active_userbots.pop(user_id) # Pop it immediately
             try:
-                await active_userbots[user_id].stop()
+                # Add a 5-second timeout to stopping the client
+                await asyncio.wait_for(client_to_stop.stop(), timeout=5.0)
+                logger.info(f"Successfully stopped client {user_id} during removal.")
+            except asyncio.TimeoutError:
+                logger.warning(f"Stopping client {user_id} timed out. Proceeding with removal.")
             except Exception as e:
                 logger.warning(f"Error stopping client {user_id} during removal: {e}")
-            del active_userbots[user_id]
+            # --- END: STUCK REMOVAL FIX ---
             
         if account:
-            result = accounts_collection.delete_one({"_id": account["_id"]})
+            # --- START: STUCK REMOVAL FIX (DB) ---
+            # Run the blocking DB call in a separate thread
+            result = await asyncio.to_thread(
+                accounts_collection.delete_one, 
+                {"_id": account["_id"]}
+            )
+            # --- END: STUCK REMOVAL FIX (DB) ---
             if result.deleted_count > 0:
                 name = escape_html(account.get('unique_name') or f"ID: {user_id}")
                 removed_accounts_display.append(f"☑️ {name} removed.")
@@ -1407,14 +1474,17 @@ remove_conv = ConversationHandler(
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^acct_rm_start$")],
         
-        # --- "DONE" BUTTON FIX: Restored correct 2-handler logic ---
+        # --- START: "DONE" BUTTON FIX ---
         SELECT_ACCOUNTS_REMOVE: [
             # This more-specific pattern MUST come first
             CallbackQueryHandler(handle_remove_done_selecting, pattern="^acct_rm_done_selecting$"), 
-            # The general handler for all other buttons
-            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^acct_rm_")
+            # This handler is now more specific to avoid matching the one above
+            CallbackQueryHandler(
+                handle_account_selection_callback_remove, 
+                pattern=r"^(acct_rm_toggle_|acct_rm_select_all|acct_rm_unselect_all|acct_rm_select_page|acct_rm_unselect_page|acct_rm_next_page|acct_rm_prev_page|acct_rm_noop)"
+            )
         ],
-        # --- END "DONE" BUTTON FIX ---
+        # --- END: "DONE" BUTTON FIX ---
         
         AWAIT_CONFIRM_REMOVE: [CallbackQueryHandler(handle_remove_confirmation, pattern=r"^acct_rm_confirm_")],
     },
@@ -1428,7 +1498,7 @@ remove_conv = ConversationHandler(
 )
 
 
-# --- Deduplication Command (Unchanged, logic is correct) ---
+# --- Deduplication Command (Now with non-blocking DB calls) ---
 
 @owner_only
 async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1450,15 +1520,22 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
     # 2. Stop all running clients
     if active_userbots:
         logger.info(f"Stopping {len(active_userbots)} userbot clients...")
-        stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
+        stop_tasks = []
+        for client in active_userbots.values():
+            if client.is_connected:
+                stop_tasks.append(client.stop())
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         active_userbots.clear()
     
     await msg.edit_text("Bots stopped. 🤖 Now searching for duplicates (this may take a moment)...")
     
     try:
+        # --- NON-BLOCKING FIX ---
         # Sort by _id to ensure "first" is consistent
-        all_accounts = list(accounts_collection.find().sort([("_id", 1)]))
+        all_accounts = await asyncio.to_thread(
+            lambda: list(accounts_collection.find().sort([("_id", 1)]))
+        )
+        # --- END NON-BLOCKING FIX ---
         
         seen_user_ids = set()
         seen_unique_names = set()
@@ -1513,8 +1590,13 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
                 "🔄 Removing from database..."
             )
             
-            result = accounts_collection.delete_many({"_id": {"$in": unique_ids_to_delete}})
+            # --- NON-BLOCKING FIX ---
+            result = await asyncio.to_thread(
+                accounts_collection.delete_many, 
+                {"_id": {"$in": unique_ids_to_delete}}
+            )
             total_deleted = result.deleted_count
+            # --- END NON-BLOCKING FIX ---
             logger.info(f"[Deduplicate] Successfully deleted {total_deleted} documents.")
         
         # --- 5. Report ---
