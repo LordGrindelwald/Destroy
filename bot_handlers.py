@@ -1097,6 +1097,7 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # --- NEW FEATURE: Handle /remove <name> ---
     if context.args:
+        # --- NOTIMPLEMENTEDERROR FIX ---
         if accounts_collection is None:
             await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
             return ConversationHandler.END
@@ -1383,6 +1384,7 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
 # --- START OF "INSTANT" HANG FIX ---
 async def _delete_account_in_background(user_id, account_doc_id):
     """Helper function to run the blocking DB deletion in the background."""
+    # --- NOTIMPLEMENTEDERROR FIX ---
     if accounts_collection is None:
         logger.error(f"Background delete failed for {user_id}: DB not connected.")
         return
