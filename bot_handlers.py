@@ -1046,14 +1046,56 @@ async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAU
     )
 
 
-# --- (FIX 1/2) REBUILT /remove ConversationHandler ---
-# All callback_data prefixes changed to "acct_rm_" to avoid conflicts.
+# --- /remove ConversationHandler ---
 
 @owner_only
 async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Entry point for the /remove ConversationHandler.
+    Entry point for /remove.
+    Handles both /remove (menu) and /remove <name> (direct).
     """
+    
+    # --- NEW FEATURE: Handle /remove <name> ---
+    if context.args:
+        if accounts_collection is None:
+            await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
+            return ConversationHandler.END
+            
+        identifier = context.args[0]
+        account = await get_account_from_arg(identifier)
+        
+        if not account:
+            await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+            
+        user_id = account.get('user_id')
+        if not user_id:
+            await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' has no user_id. Cannot remove.", parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+
+        # Store the single selected account
+        context.user_data['selected_accounts'] = {user_id}
+        
+        # Go straight to confirmation
+        unique_name = account.get('unique_name')
+        name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
+        
+        text = (
+            f"<b>FINAL CONFIRMATION</b>\n\n"
+            f"Are you sure you want to permanently remove this account?\n"
+            f"• {name}\n\n"
+            "This action is <b>IRREVERSIBLE</b>."
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ Yes, Remove It", callback_data="acct_rm_confirm_yes")],
+            [InlineKeyboardButton("❌ No, Cancel", callback_data="acct_rm_confirm_no")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_html(text, reply_markup=reply_markup)
+        return AWAIT_CONFIRM_REMOVE # Skip to the confirmation state
+
+    # --- Original Flow: /remove (no args) ---
     keyboard = [[InlineKeyboardButton("Select Accounts to Remove 🗑️", callback_data="acct_rm_start")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_html(
@@ -1152,26 +1194,23 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
         prefix = "✅" if is_selected else "🗑️"
         button_text = f"{prefix} {name}".strip()
         
-        callback = f"acct_rm_toggle_{user_id}" # <-- CHANGED
+        callback = f"acct_rm_toggle_{user_id}"
         account_buttons.append(InlineKeyboardButton(button_text, callback_data=callback))
 
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
-    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="acct_rm_done_selecting")]) # <-- CHANGED
+    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="acct_rm_done_selecting")])
 
     page_buttons = []
     if current_page > 0:
-        page_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data="acct_rm_prev_page")) # <-- CHANGED
-    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="acct_rm_noop")) # <-- CHANGED
+        page_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data="acct_rm_prev_page"))
+    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="acct_rm_noop"))
     if current_page < total_pages - 1:
-        page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="acct_rm_next_page")) # <-- CHANGED
+        page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="acct_rm_next_page"))
     keyboard.append(page_buttons)
 
-    # --- BUG FIX ---
-    # Changed callback_data to not conflict with the state's regex pattern
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_rm_conv")]) # <-- CHANGED
-    # --- END BUG FIX ---
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_rm_conv")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1190,16 +1229,54 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     return SELECT_ACCOUNTS_REMOVE
 
 
-# --- START: "DONE" BUTTON FIX ---
-# We are deleting the separate `handle_remove_done_selecting` function
-# and merging its logic back into `handle_account_selection_callback_remove`
-# --- END: "DONE" BUTTON FIX ---
+# --- START: "DONE" BUTTON FIX (Restored) ---
+@owner_only
+async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Done Selecting' button press in the remove flow."""
+    query = update.callback_query
+    await query.answer()
+    
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    
+    if not selected_accounts:
+        await query.answer("⚠️ Please select at least one account.", show_alert=True)
+        return SELECT_ACCOUNTS_REMOVE # Stay in this state
+    
+    account_names = []
+    if accounts_collection:
+        selected_docs = list(accounts_collection.find(
+            {"user_id": {"$in": list(selected_accounts)}},
+            {"first_name": 1, "unique_name": 1, "user_id": 1}
+        ))
+        for acc in selected_docs:
+            unique_name = acc.get('unique_name')
+            user_id = acc.get('user_id')
+            name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
+            account_names.append(f"• {name}")
+    
+    names_list_str = '\n'.join(account_names)
+    text = (
+        f"<b>FINAL CONFIRMATION</b>\n\n"
+        f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
+        f"{names_list_str}\n\n"
+        "This action is <b>IRREVERSIBLE</b>."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="acct_rm_confirm_yes")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="acct_rm_confirm_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    return AWAIT_CONFIRM_REMOVE # Move to next state
+# --- END: "DONE" BUTTON FIX (Restored) ---
 
 
 @owner_only
 async def handle_account_selection_callback_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles all button presses within the account REMOVAL selection menu.
+    Handles all *other* button presses within the account REMOVAL selection menu.
     """
     query = update.callback_query
     await query.answer()
@@ -1247,42 +1324,8 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
     elif data == "acct_rm_noop":
         return SELECT_ACCOUNTS_REMOVE
         
-    # --- START: "DONE" BUTTON FIX ---
-    # Logic for "Done" button is now merged back into this handler
-    elif data == "acct_rm_done_selecting":
-        if not selected_accounts:
-            await query.answer("⚠️ Please select at least one account.", show_alert=True)
-            return SELECT_ACCOUNTS_REMOVE # Stay in this state
-        
-        account_names = []
-        if accounts_collection:
-            selected_docs = list(accounts_collection.find(
-                {"user_id": {"$in": list(selected_accounts)}},
-                {"first_name": 1, "unique_name": 1, "user_id": 1}
-            ))
-            for acc in selected_docs:
-                unique_name = acc.get('unique_name')
-                user_id = acc.get('user_id')
-                name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
-                account_names.append(f"• {name}")
-        
-        names_list_str = '\n'.join(account_names)
-        text = (
-            f"<b>FINAL CONFIRMATION</b>\n\n"
-            f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
-            f"{names_list_str}\n\n"
-            "This action is <b>IRREVERSIBLE</b>."
-        )
-
-        keyboard = [
-            [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="acct_rm_confirm_yes")],
-            [InlineKeyboardButton("❌ No, Cancel", callback_data="acct_rm_confirm_no")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-        return AWAIT_CONFIRM_REMOVE # Move to next state
-    # --- END: "DONE" BUTTON FIX ---
+    # Note: The "acct_rm_done_selecting" case is now handled by the separate
+    # handle_remove_done_selecting function, which is called first.
 
     context.user_data['selected_accounts'] = selected_accounts
     return await draw_account_selection_menu_remove(query, context)
@@ -1294,7 +1337,7 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     
-    if query.data == "acct_rm_confirm_no": # <-- CHANGED
+    if query.data == "acct_rm_confirm_no":
         await query.edit_message_text("✖️ Remove process cancelled.")
         context.user_data.clear()
         return ConversationHandler.END
@@ -1332,7 +1375,7 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
             
     final_message = "\n".join(removed_accounts_display)
     if not final_message:
-        final_message = "No accounts were removed."
+        final_message = "No accounts were removed (or an error occurred)."
         
     await query.edit_message_text(final_message)
     context.user_data.clear()
@@ -1359,13 +1402,16 @@ async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- Define the ConversationHandler ---
 remove_conv = ConversationHandler(
     entry_points=[
-        CommandHandler("remove", remove_start)
+        CommandHandler("remove", remove_start) # Now handles /remove AND /remove <name>
     ],
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^acct_rm_start$")],
         
-        # --- "DONE" BUTTON FIX: Reverted to a single, broad handler ---
+        # --- "DONE" BUTTON FIX: Restored correct 2-handler logic ---
         SELECT_ACCOUNTS_REMOVE: [
+            # This more-specific pattern MUST come first
+            CallbackQueryHandler(handle_remove_done_selecting, pattern="^acct_rm_done_selecting$"), 
+            # The general handler for all other buttons
             CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^acct_rm_")
         ],
         # --- END "DONE" BUTTON FIX ---
@@ -1380,10 +1426,9 @@ remove_conv = ConversationHandler(
     ],
     conversation_timeout=600,
 )
-# --- (END FIX 1/2) ---
 
 
-# --- (FIX 2/2) REBUILT /deduplicate_db command ---
+# --- Deduplication Command (Unchanged, logic is correct) ---
 
 @owner_only
 async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1489,4 +1534,3 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
-# --- (END FIX 2/2) ---
