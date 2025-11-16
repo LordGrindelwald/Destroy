@@ -1247,7 +1247,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
         keyboard.append(account_buttons[i:i+2])
         
     # --- START OF BUTTON FIX ---
-    # Renamed this callback_data to be unique and avoid any pattern conflicts
+    # We use a unique callback_data to avoid any pattern conflicts
     keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="dnrm_done_select")])
     # --- END OF BUTTON FIX ---
 
@@ -1278,14 +1278,55 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     return SELECT_ACCOUNTS_REMOVE
 
 
-# --- START: "DONE" BUTTON FIX (New unified handler) ---
+# --- START: "DONE" BUTTON FIX (Reverting to 2-handler system) ---
 @owner_only
-async def handle_remove_menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles ALL button presses within the account REMOVAL selection menu.
-    This replaces handle_remove_done_selecting and handle_account_selection_callback_remove
-    to prevent any handler conflicts.
-    """
+async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Done Selecting' button press (dnrm_done_select)."""
+    query = update.callback_query
+    await query.answer()
+    
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    
+    if not selected_accounts:
+        await query.answer("⚠️ Please select at least one account.", show_alert=True)
+        return SELECT_ACCOUNTS_REMOVE # Stay in this state
+    
+    account_names = []
+    if accounts_collection:
+        # Run blocking DB calls in a thread
+        selected_docs = await asyncio.to_thread(
+            lambda: list(accounts_collection.find(
+                {"user_id": {"$in": list(selected_accounts)}},
+                {"first_name": 1, "unique_name": 1, "user_id": 1}
+            ))
+        )
+        for acc in selected_docs:
+            unique_name = acc.get('unique_name')
+            user_id = acc.get('user_id')
+            name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
+            account_names.append(f"• {name}")
+    
+    names_list_str = '\n'.join(account_names)
+    text = (
+        f"<b>FINAL CONFIRMATION</b>\n\n"
+        f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
+        f"{names_list_str}\n\n"
+        "This action is <b>IRREVERSIBLE</b>."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="acct_rm_confirm_yes")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="acct_rm_confirm_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    return AWAIT_CONFIRM_REMOVE # Move to next state
+
+
+@owner_only
+async def handle_account_selection_callback_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all *other* button presses (acct_rm_)."""
     query = update.callback_query
     await query.answer()
     
@@ -1295,46 +1336,7 @@ async def handle_remove_menu_callbacks(update: Update, context: ContextTypes.DEF
     selected_accounts = context.user_data.get('selected_accounts', set())
     current_page = context.user_data.get('current_page', 0)
     
-    # --- "Done" button logic ---
-    if data == "dnrm_done_select":
-        if not selected_accounts:
-            await query.answer("⚠️ Please select at least one account.", show_alert=True)
-            return SELECT_ACCOUNTS_REMOVE # Stay in this state
-        
-        account_names = []
-        if accounts_collection:
-            # Run blocking DB calls in a thread
-            selected_docs = await asyncio.to_thread(
-                lambda: list(accounts_collection.find(
-                    {"user_id": {"$in": list(selected_accounts)}},
-                    {"first_name": 1, "unique_name": 1, "user_id": 1}
-                ))
-            )
-            for acc in selected_docs:
-                unique_name = acc.get('unique_name')
-                user_id = acc.get('user_id')
-                name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
-                account_names.append(f"• {name}")
-        
-        names_list_str = '\n'.join(account_names)
-        text = (
-            f"<b>FINAL CONFIRMATION</b>\n\n"
-            f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
-            f"{names_list_str}\n\n"
-            "This action is <b>IRREVERSIBLE</b>."
-        )
-
-        keyboard = [
-            [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="acct_rm_confirm_yes")],
-            [InlineKeyboardButton("❌ No, Cancel", callback_data="acct_rm_confirm_no")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-        return AWAIT_CONFIRM_REMOVE # Move to next state
-
-    # --- All other button logic ---
-    elif data.startswith("acct_rm_toggle_"):
+    if data.startswith("acct_rm_toggle_"):
         user_id = int(data.split("_")[3])
         if user_id in selected_accounts:
             selected_accounts.discard(user_id)
@@ -1369,12 +1371,33 @@ async def handle_remove_menu_callbacks(update: Update, context: ContextTypes.DEF
             context.user_data['current_page'] = current_page - 1
             
     elif data == "acct_rm_noop":
-        return SELECT_ACCOUNTS_REMOVE # Do nothing but stay in state
+        return SELECT_ACCOUNTS_REMOVE
         
     context.user_data['selected_accounts'] = selected_accounts
-    # Redraw the menu with updated selections
     return await draw_account_selection_menu_remove(query, context)
 # --- END: "DONE" BUTTON FIX ---
+
+
+# --- START OF "INSTANT" HANG FIX ---
+async def _delete_account_in_background(user_id, account_doc_id):
+    """Helper function to run the blocking DB deletion in the background."""
+    if accounts_collection is None:
+        logger.error(f"Background delete failed for {user_id}: DB not connected.")
+        return
+        
+    try:
+        # Run the blocking DB call in a separate thread
+        result = await asyncio.to_thread(
+            accounts_collection.delete_one, 
+            {"_id": account_doc_id}
+        )
+        if result.deleted_count > 0:
+            logger.info(f"Background delete successful for user_id {user_id} (doc_id {account_doc_id}).")
+        else:
+            logger.warning(f"Background delete for {user_id} (doc_id {account_doc_id}) removed 0 documents.")
+    except Exception as e:
+        logger.error(f"Background delete failed for {user_id} (doc_id {account_doc_id}): {e}")
+# --- END OF "INSTANT" HANG FIX ---
 
 
 @owner_only
@@ -1395,16 +1418,16 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
-    # --- START OF "INSTANT" REMOVAL FIX ---
-    await query.edit_message_text(f"🔄 Removing {len(selected_accounts)} accounts. Please wait...")
-    # --- END OF "INSTANT" REMOVAL FIX ---
+    # --- "INSTANT" FIX: Changed message text ---
+    await query.edit_message_text(f"✅ Removing {len(selected_accounts)} accounts. This is now instant.")
     
     removed_accounts_display = []
     
     for user_id in selected_accounts:
         account = None
         if accounts_collection:
-            # Fetch the account to get its _id and name
+            # We still need to fetch the account to get its _id,
+            # but this is a read operation (find_one) and should be fast.
             account = await asyncio.to_thread(
                 accounts_collection.find_one, 
                 {"user_id": user_id},
@@ -1415,31 +1438,27 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         stop_online_job(user_id)
         
         # "Fire-and-forget" stop for the Pyrogram client
-        # This was the original hang, so we keep it in the background
         if user_id in active_userbots:
             client_to_stop = active_userbots.pop(user_id) # Pop it immediately
             asyncio.create_task(client_to_stop.stop())
             logger.info(f"Scheduled client {user_id} for background stop.")
             
-        # --- START OF "INSTANT" REMOVAL FIX ---
-        # Perform the database deletion directly and wait for it
+        # --- "INSTANT" FIX: "Fire-and-forget" the database deletion ---
         if account:
-            result = await asyncio.to_thread(
-                accounts_collection.delete_one, 
-                {"_id": account["_id"]}
-            )
-            if result.deleted_count > 0:
-                name = escape_html(account.get('unique_name') or f"ID: {user_id}")
-                removed_accounts_display.append(f"☑️ {name} removed.")
-            else:
-                logger.warning(f"DB delete for {user_id} returned 0 deleted count.")
+            account_doc_id = account["_id"]
+            # This runs the delete in the background. The bot does NOT wait for it.
+            asyncio.create_task(_delete_account_in_background(user_id, account_doc_id))
+            
+            name = escape_html(account.get('unique_name') or f"ID: {user_id}")
+            # The message confirms the *action* (removal), not the *result*
+            removed_accounts_display.append(f"☑️ {name} removal initiated.")
         else:
             logger.warning(f"Could not find account doc for user_id {user_id} to delete.")
-        # --- END OF "INSTANT" REMOVAL FIX ---
+        # --- END OF "INSTANT" FIX ---
             
     final_message = "\n".join(removed_accounts_display)
     if not final_message:
-        final_message = "No accounts were removed (or an error occurred)."
+        final_message = "No accounts were found to remove."
         
     await query.edit_message_text(final_message)
     context.user_data.clear()
@@ -1471,10 +1490,13 @@ remove_conv = ConversationHandler(
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^acct_rm_start$")],
         
-        # --- START OF BUTTON FIX ---
-        # This single handler now manages all buttons in this state
+        # --- START OF BUTTON FIX (Reverted to 2-handler) ---
         SELECT_ACCOUNTS_REMOVE: [
-            CallbackQueryHandler(handle_remove_menu_callbacks, pattern=r"^(dnrm_done_select|acct_rm_)")
+            # This specific pattern for the "Done" button MUST come first
+            CallbackQueryHandler(handle_remove_done_selecting, pattern=r"^dnrm_done_select$"),
+            
+            # This pattern handles all other buttons (toggle, page, select all)
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^acct_rm_")
         ],
         # --- END OF BUTTON FIX ---
         
