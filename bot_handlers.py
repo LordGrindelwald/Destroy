@@ -1163,7 +1163,9 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
-    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="rm_done")])
+    # --- FIX: Changed callback_data to be explicit ---
+    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="rm_confirm_selection")])
+    # --- END FIX ---
 
     page_buttons = []
     if current_page > 0:
@@ -1247,7 +1249,9 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
     elif data == "rm_noop":
         return SELECT_ACCOUNTS_REMOVE
         
-    elif data == "rm_done":
+    # --- FIX: Changed data to be explicit ---
+    elif data == "rm_confirm_selection":
+    # --- END FIX ---
         if not selected_accounts:
             await query.answer("⚠️ Please select at least one account.", show_alert=True)
             return SELECT_ACCOUNTS_REMOVE
@@ -1375,7 +1379,19 @@ remove_conv = ConversationHandler(
     states={
         # --- FIX: Add new start state ---
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^rm_start_selection$")],
-        SELECT_ACCOUNTS_REMOVE: [CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_")],
+        # --- FIX: Split handlers for explicit matching ---
+        SELECT_ACCOUNTS_REMOVE: [
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_toggle_"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_select_all$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_unselect_all$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_select_page$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_unselect_page$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_next_page$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_prev_page$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_noop$"),
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_confirm_selection$")
+        ],
+        # --- END FIX ---
         AWAIT_CONFIRM_REMOVE: [CallbackQueryHandler(handle_remove_confirmation, pattern=r"^rm_confirm_")],
     },
     fallbacks=[
@@ -1449,7 +1465,6 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
             total_deleted += uid_deleted_count
             
         # --- 4. Fix unique_name duplicates ---
-        # --- THIS IS THE FIX: Group by the $toLower version of the name ---
         pipeline_name = [
             {
                 '$match': {
@@ -1458,7 +1473,10 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
             },
             {
                 '$group': {
-                    '_id': {'$toLower': '$unique_name'}, 
+                    # --- THIS IS THE FIX ---
+                    # Trim whitespace, THEN convert to lower
+                    '_id': {'$toLower': {'$trim': {'input': '$unique_name'}}},
+                    # --- END FIX ---
                     'count': {'$sum': 1}, 
                     'ids': {'$push': '$_id'}
                 }
@@ -1469,7 +1487,6 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
                 }
             }
         ]
-        # --- END FIX ---
         duplicates_name = list(accounts_collection.aggregate(pipeline_name))
         
         name_deleted_count = 0
