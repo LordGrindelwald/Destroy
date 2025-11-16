@@ -1416,17 +1416,16 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         stop_online_job(user_id)
         
         if user_id in active_userbots:
-            # --- START: STUCK REMOVAL FIX ---
+            # --- NEW "FIRE-AND-FORGET" FIX ---
             client_to_stop = active_userbots.pop(user_id) # Pop it immediately
-            try:
-                # Add a 5-second timeout to stopping the client
-                await asyncio.wait_for(client_to_stop.stop(), timeout=5.0)
-                logger.info(f"Successfully stopped client {user_id} during removal.")
-            except asyncio.TimeoutError:
-                logger.warning(f"Stopping client {user_id} timed out. Proceeding with removal.")
-            except Exception as e:
-                logger.warning(f"Error stopping client {user_id} during removal: {e}")
-            # --- END: STUCK REMOVAL FIX ---
+            
+            # Schedule the stop() call to run in the background.
+            # We DO NOT await it, so we can't get stuck.
+            # If it hangs, only that background task is affected.
+            asyncio.create_task(client_to_stop.stop())
+            
+            logger.info(f"Scheduled client {user_id} for background stop. Proceeding with removal.")
+            # --- END: NEW "FIRE-AND-FORGET" FIX ---
             
         if account:
             # --- START: STUCK REMOVAL FIX (DB) ---
