@@ -1308,6 +1308,9 @@ async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEF
             user_id = acc.get('user_id')
             name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
             account_names.append(f"• {name}")
+    else:
+        await query.edit_message_text("⚠️ Database connection error. Cannot proceed.")
+        return ConversationHandler.END
     
     names_list_str = '\n'.join(account_names)
     text = (
