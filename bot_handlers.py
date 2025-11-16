@@ -1205,6 +1205,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     page_account_ids = all_account_ids[start_index:end_index]
     
     page_accounts = []
+    # --- NOTIMPLEMENTEDERROR FIX ---
     if accounts_collection is not None:
         # Run blocking DB calls in a thread
         page_accounts = await asyncio.to_thread(
@@ -1292,7 +1293,8 @@ async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEF
         return SELECT_ACCOUNTS_REMOVE # Stay in this state
     
     account_names = []
-    if accounts_collection:
+    # --- NOTIMPLEMENTEDERROR FIX ---
+    if accounts_collection is not None:
         # Run blocking DB calls in a thread
         selected_docs = await asyncio.to_thread(
             lambda: list(accounts_collection.find(
@@ -1418,14 +1420,15 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
         
-    # --- "INSTANT" FIX: Changed message text ---
-    await query.edit_message_text(f"✅ Removing {len(selected_accounts)} accounts. This is now instant.")
+    # --- "INSTANT" FIX: Removed "Scheduling" message ---
+    await query.edit_message_text(f"🔄 Removing {len(selected_accounts)} accounts...")
     
     removed_accounts_display = []
     
     for user_id in selected_accounts:
         account = None
-        if accounts_collection:
+        # --- NOTIMPLEMENTEDERROR FIX ---
+        if accounts_collection is not None:
             # We still need to fetch the account to get its _id,
             # but this is a read operation (find_one) and should be fast.
             account = await asyncio.to_thread(
@@ -1460,6 +1463,7 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
     if not final_message:
         final_message = "No accounts were found to remove."
         
+    # Show the "removal initiated" message immediately
     await query.edit_message_text(final_message)
     context.user_data.clear()
     return ConversationHandler.END
