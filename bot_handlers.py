@@ -1054,14 +1054,13 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Entry point for the /remove ConversationHandler.
     Shows a start button.
     """
-    # --- FIX: Show start button ---
     keyboard = [[InlineKeyboardButton("Select Accounts to Remove 🗑️", callback_data="rm_start_selection")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_html(
         "Click the button to select the account(s) for removal.",
         reply_markup=reply_markup
     )
-    return AWAIT_BUTTON_REMOVE # <-- NEW STATE
+    return AWAIT_BUTTON_REMOVE
 
 
 @owner_only
@@ -1089,8 +1088,7 @@ async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_accounts'] = set()
     context.user_data['current_page'] = 0
     
-    # Call the draw function, now passing the query
-    await draw_account_selection_menu_remove(query, context) # Pass query
+    await draw_account_selection_menu_remove(query, context)
     return SELECT_ACCOUNTS_REMOVE
 
 
@@ -1098,13 +1096,12 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     """
     Draws the paginated multi-select account menu for REMOVAL.
     """
-    # Handle whether we get the full Update or just the Query
     if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
-        query = update_or_query.callback_query # From remove_menu
+        query = update_or_query.callback_query
     elif hasattr(update_or_query, 'data'):
-        query = update_or_query # From subsequent callbacks
+        query = update_or_query
     else:
-        query = None # Should not happen if entry is correct
+        query = None
         
     all_account_ids = context.user_data.get('all_account_ids', [])
     selected_accounts = context.user_data.get('selected_accounts', set())
@@ -1148,10 +1145,8 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     account_buttons = []
     for acc in sorted_page_accounts:
         user_id = acc['user_id']
-        # --- FIX: Use management username ---
         unique_name = acc.get('unique_name')
         name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
-        # --- END FIX ---
         
         is_selected = user_id in selected_accounts
         prefix = "✅" if is_selected else "🗑️"
@@ -1163,9 +1158,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
-    # --- FIX: Changed callback_data back to "rm_done" ---
     keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="rm_done")])
-    # --- END FIX ---
 
     page_buttons = []
     if current_page > 0:
@@ -1175,10 +1168,7 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="rm_next_page"))
     keyboard.append(page_buttons)
 
-    # --- FIX: Add Cancel Button ---
-    # --- BUGFIX: Changed callback_data to not conflict with state pattern ---
     keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_rm_conv")])
-    # --- END FIX ---
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1193,7 +1183,6 @@ async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQ
             await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception as e:
             logger.warning(f"Error editing message in draw_account_selection_menu_remove: {e}")
-    # --- FIX: Removed invalid comment and obsolete else block ---
         
     return SELECT_ACCOUNTS_REMOVE
 
@@ -1249,14 +1238,11 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
     elif data == "rm_noop":
         return SELECT_ACCOUNTS_REMOVE
         
-    # --- FIX: Changed data check back to "rm_done" ---
     elif data == "rm_done":
-    # --- END FIX ---
         if not selected_accounts:
             await query.answer("⚠️ Please select at least one account.", show_alert=True)
             return SELECT_ACCOUNTS_REMOVE
         
-        # --- NEW: Final Confirmation Step ---
         account_names = []
         if accounts_collection:
             selected_docs = list(accounts_collection.find(
@@ -1264,22 +1250,18 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
                 {"first_name": 1, "unique_name": 1, "user_id": 1}
             ))
             for acc in selected_docs:
-                # --- FIX: Use management username ---
                 unique_name = acc.get('unique_name')
                 user_id = acc.get('user_id')
                 name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
-                # --- END FIX ---
                 account_names.append(f"• {name}")
         
-        # --- SYNTAX ERROR FIX ---
-        names_list_str = '\n'.join(account_names) # Create string first
+        names_list_str = '\n'.join(account_names)
         text = (
             f"<b>FINAL CONFIRMATION</b>\n\n"
             f"Are you sure you want to permanently remove these {len(selected_accounts)} accounts?\n"
-            f"{names_list_str}\n\n" # Use variable
+            f"{names_list_str}\n\n"
             "This action is <b>IRREVERSIBLE</b>."
         )
-        # --- END FIX ---
 
         keyboard = [
             [InlineKeyboardButton("✅ Yes, Remove Them", callback_data="rm_confirm_yes")],
@@ -1291,7 +1273,6 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
         return AWAIT_CONFIRM_REMOVE
 
     context.user_data['selected_accounts'] = selected_accounts
-    # Pass query to the draw function
     return await draw_account_selection_menu_remove(query, context)
 
 
@@ -1318,16 +1299,12 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
     removed_accounts_display = []
     
     for user_id in selected_accounts:
-        # --- FIX: Get account doc before deleting ---
         account = None
         if accounts_collection:
             account = accounts_collection.find_one({"user_id": user_id})
-        # --- END FIX ---
         
-        # 1. Stop online job
         stop_online_job(user_id)
         
-        # 2. Stop running client
         if user_id in active_userbots:
             try:
                 await active_userbots[user_id].stop()
@@ -1335,13 +1312,11 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
                 logger.warning(f"Error stopping client {user_id} during removal: {e}")
             del active_userbots[user_id]
             
-        # 3. Delete from DB
         if account:
             result = accounts_collection.delete_one({"_id": account["_id"]})
             if result.deleted_count > 0:
                 name = escape_html(account.get('unique_name') or f"ID: {user_id}")
                 removed_accounts_display.append(f"☑️ {name} removed.")
-        # --- END FIX ---
             
     final_message = "\n".join(removed_accounts_display)
     if not final_message:
@@ -1357,7 +1332,6 @@ async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Cancels the remove selection conversation."""
     context.user_data.clear()
     
-    # --- FIX: Edit message on cancel ---
     if update.callback_query:
         await update.callback_query.answer()
         try:
@@ -1366,7 +1340,6 @@ async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.callback_query.message.reply_text("✖️ Remove process cancelled.")
     else:
         await update.message.reply_text("✖️ Remove process cancelled.")
-    # --- END FIX ---
             
     return ConversationHandler.END
 
@@ -1379,12 +1352,12 @@ remove_conv = ConversationHandler(
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^rm_start_selection$")],
         
-        # --- THIS IS THE FIX for the "Done" button ---
-        # The first handler catches all "rm_" buttons (toggle, page, select all)
-        # The second handler *explicitly* catches "rm_done"
+        # --- THIS IS THE FIX ---
+        # We MUST put the most specific pattern (rm_done) before the more
+        # general pattern (rm_) so it gets matched first.
         SELECT_ACCOUNTS_REMOVE: [
+            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_done$"),
             CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_"), 
-            CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^rm_done$")
         ],
         # --- END FIX ---
 
@@ -1426,65 +1399,72 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         active_userbots.clear()
     
-    await msg.edit_text("Bots stopped. 🤖 Now searching for duplicates (Python loop)...")
+    await msg.edit_text("Bots stopped. 🤖 Now searching for duplicates...")
     
-    # --- THIS IS THE NEW, ROBUST DEDUPLICATION LOGIC ---
+    total_deleted = 0
+    uid_deleted_count = 0
+    name_deleted_count = 0
+    
     try:
-        # Sort to keep the "first" document somewhat consistently
-        all_accounts = list(accounts_collection.find().sort([("_id", 1)]))
+        # --- 3. Fix user_id duplicates ---
+        pipeline_uid = [
+            {'$match': {'user_id': {'$ne': None}}},
+            {'$group': {'_id': '$user_id', 'count': {'$sum': 1}, 'ids': {'$push': '$_id'}}},
+            {'$match': {'count': {'$gt': 1}}}
+        ]
+        duplicates_uid = list(accounts_collection.aggregate(pipeline_uid))
         
-        seen_user_ids = set()
-        seen_unique_names = set()
-        ids_to_delete = []
+        if duplicates_uid:
+            await msg.edit_text(f"Found {len(duplicates_uid)} user_id duplicate groups. Removing extras...")
+            ids_to_delete = []
+            for group in duplicates_uid:
+                ids_to_delete.extend(group['ids'][1:]) # Keep first, delete rest
+            
+            if ids_to_delete:
+                result = accounts_collection.delete_many({"_id": {"$in": ids_to_delete}})
+                uid_deleted_count = result.deleted_count
+                total_deleted += uid_deleted_count
+            
+        # --- 4. Fix unique_name duplicates ---
+        # --- THIS IS THE ROBUST AGGREGATION FIX ---
+        pipeline_name = [
+            {
+                '$match': {
+                    'unique_name': {'$ne': None, '$ne': ''} # Must exist and not be empty
+                }
+            },
+            {
+                '$group': {
+                    '_id': {'$toLower': {'$trim': {'input': '$unique_name'}}}, # Trim, lowercase
+                    'count': {'$sum': 1}, 
+                    'ids': {'$push': '$_id'}
+                }
+            }, 
+            {
+                '$match': {
+                    'count': {'$gt': 1} # Find groups with more than one
+                }
+            }
+        ]
+        # --- END FIX ---
         
-        uid_deleted_count = 0
-        name_deleted_count = 0
+        duplicates_name = list(accounts_collection.aggregate(pipeline_name))
         
-        for acc in all_accounts:
-            doc_id = acc['_id']
-            user_id = acc.get('user_id')
-            unique_name = acc.get('unique_name')
-            
-            # Flag to check if we should delete this doc
-            delete_this = False
-            
-            # 1. Check user_id
-            if user_id is not None:
-                if user_id in seen_user_ids:
-                    delete_this = True
-                    uid_deleted_count += 1
-                else:
-                    seen_user_ids.add(user_id)
-            
-            # 2. Check unique_name (case and whitespace insensitive)
-            if unique_name is not None:
-                name_key = str(unique_name).strip().lower()
-                if name_key: # Ensure it's not an empty string
-                    if name_key in seen_unique_names:
-                        # Only increment name_deleted_count if it wasn't *already* flagged
-                        if not delete_this:
-                            name_deleted_count += 1
-                        delete_this = True
-                    else:
-                        seen_unique_names.add(name_key)
-            
-            if delete_this:
-                ids_to_delete.append(doc_id)
-
-        total_deleted = 0
-        if ids_to_delete:
-            # Get unique list of doc IDs to delete
-            unique_ids_to_delete = list(set(ids_to_delete))
-            
+        if duplicates_name:
             await msg.edit_text(
-                f"Found {uid_deleted_count} duplicates by user_id.\n"
-                f"Found {name_deleted_count} duplicates by unique_name.\n"
-                f"Total unique documents to delete: {len(unique_ids_to_delete)}.\n\n"
-                "🔄 Removing from database..."
+                f"Removed {uid_deleted_count} user_id duplicates.\n"
+                f"Found {len(duplicates_name)} unique_name duplicate groups. Removing extras..."
             )
+            ids_to_delete = []
+            for group in duplicates_name:
+                ids_to_delete.extend(group['ids'][1:]) # Keep first, delete rest
             
-            result = accounts_collection.delete_many({"_id": {"$in": unique_ids_to_delete}})
-            total_deleted = result.deleted_count
+            if ids_to_delete:
+                # Need to de-duplicate this list in case a doc was in both groups
+                unique_ids_to_delete = list(set(ids_to_delete))
+                result = accounts_collection.delete_many({"_id": {"$in": unique_ids_to_delete}})
+                name_deleted_count = result.deleted_count
+                total_deleted = uid_deleted_count + name_deleted_count # Recalculate
         
         # --- 5. Report ---
         final_message = (
@@ -1503,4 +1483,3 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
-    # --- END OF NEW LOGIC ---
