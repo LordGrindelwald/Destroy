@@ -2,6 +2,7 @@ import asyncio
 import random
 import traceback
 import time
+import gc # <-- NEW: For manual garbage collection
 from functools import partial
 
 from pyrogram import Client, filters
@@ -31,11 +32,14 @@ async def perform_online_action(context: dict):
     """
     Job callback to send/delete message, wait 10s ONLINE, STOP, wait 3s OFFLINE,
     then START and RE-ADD THE OTP HANDLER.
+    
+    OPTIMIZED: Fixes memory leak by removing old handlers and forcing GC.
     """
     # Get both client and ptb_app from context
     client: Client = context.job.data['client']
     ptb_app: Application = context.job.data['ptb_app']
     
+    # Safely get user ID for logging
     user_id_log = client.me.id if client.me else "Unknown"
 
     try:
@@ -49,30 +53,45 @@ async def perform_online_action(context: dict):
         await msg.delete()
         logger.info(f"Successfully performed online action (send/delete) for {user_id_log}")
 
-        # --- MODIFICATION: Wait 10 seconds while ONLINE ---
+        # Wait 10 seconds while ONLINE
         await asyncio.sleep(10)
-        # --- END MODIFICATION ---
 
         # 3. Go Offline (fully stop client)
         await client.stop()
         logger.info(f"Client {user_id_log} stopped (Offline state).")
 
-        # --- MODIFICATION: Wait 3 seconds WHILE offline ---
+        # Wait 3 seconds WHILE offline
         await asyncio.sleep(3)
-        # --- END MODIFICATION ---
 
-        # 5. Connect back again
+        # 4. Connect back again
         await client.start()
         
-        # 6. CRITICAL FIX: Re-add the forwarder handler
+        # 5. CRITICAL FIX: Re-add the forwarder handler
+        # MEMORY LEAK FIX: Retrieve old handler from job data and remove it
+        old_handler = context.job.data.get('current_handler')
+        if old_handler:
+            try:
+                # Remove the specific handler instance we created last time
+                client.remove_handler(old_handler, group=0)
+                logger.info(f"Successfully removed old handler for {user_id_log}.")
+            except Exception as e:
+                logger.warning(f"Could not remove old handler for {user_id_log}: {e}")
+        
+        # Create new handler
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         source_chat_id = await get_source_chat()
-        client.add_handler(MessageHandler(
+        
+        new_handler = MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service
-        ))
+        )
         
-        logger.info(f"Client {user_id_log} restarted and handler re-added (Online state).")
+        client.add_handler(new_handler)
+        
+        # Save this handler instance so we can remove it next time
+        context.job.data['current_handler'] = new_handler
+        
+        logger.info(f"Client {user_id_log} restarted and new handler re-added (Online state).")
 
     except Exception as e:
         logger.warning(f"Failed to perform online action cycle for {user_id_log}: {e}")
@@ -83,14 +102,28 @@ async def perform_online_action(context: dict):
                 await client.start()
                 
                 # CRITICAL FIX (in error block): Re-add handler on recovery
+                old_handler = context.job.data.get('current_handler')
+                if old_handler:
+                    try: client.remove_handler(old_handler, group=0)
+                    except: pass
+
                 handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
                 source_chat_id = await get_source_chat()
-                client.add_handler(MessageHandler(
+                
+                new_handler = MessageHandler(
                     handler_with_context, 
                     filters.chat(source_chat_id) & ~filters.service
-                ))
+                )
+                client.add_handler(new_handler)
+                context.job.data['current_handler'] = new_handler
+                
             except Exception as e2:
                 logger.error(f"Recovery restart failed for {user_id_log}: {e2}")
+
+    finally:
+        # Resource Frugality: Force garbage collection after heavy operation
+        # This is a key step to aggressively free up Python/Pyrogram memory.
+        gc.collect()
 
 
 async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
@@ -119,8 +152,8 @@ async def schedule_online_job(client: Client, interval_str: str, ptb_app: Applic
         logger.info(f"Interval for {user_id} is default (1440). No online job scheduled.")
         return
 
-    # Pass ptb_app into the job context
-    job_context = {'client': client, 'ptb_app': ptb_app}
+    # Pass ptb_app and initialize 'current_handler' as None
+    job_context = {'client': client, 'ptb_app': ptb_app, 'current_handler': None}
     
     job = ptb_app.job_queue.run_repeating(
         perform_online_action,
@@ -150,20 +183,17 @@ async def forward_message(client: Client, message: Message, target_chat: str):
     Copies the message to target_chat (Bot PM)
     and attempts to call InvalidateSignInCodes.
     """
-    # --- THIS IS THE WORKING LOGIC FROM NEWEXAMPLE ---
     if client.me.id in paused_forwarding: 
         logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
         return
         
     try:
-        # Check if client.me exists before calling copy
         if client.me:
-            # --- THIS IS THE WORKING LOGIC ---
             await message.copy(chat_id=target_chat)
-            # --- DO NOT DELETE THE COPIED MESSAGE ---
         
         # Invalidate sign-in codes to destroy the OTP immediately
         try:
+            # We assume InvalidateSignInCodes is either a method or a bound function
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
@@ -179,20 +209,16 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
     """Sends a notification to the owner about the received OTP message."""
     if OWNER_ID in paused_notifications: return
     
-    # Check status for display in the notification
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
     
-    # --- THIS IS THE WORKING LOGIC FROM NEWEXAMPLE ---
     if client.me.id in paused_forwarding: 
         status_parts[0] = "⏸️ OTP Paused (Temp)"
         
     if OWNER_ID in paused_notifications: 
         status_parts[1] = "⏸️ Notify Paused"
-    # --- END ---
 
     content = message.text or message.caption or "(Media)"
     
-    # Get the userbot's display name
     header = f"👤 <b>{escape_html(client.me.first_name)}</b>"
     
     notification_text = (f"{header}\n<b>Status:</b> {' | '.join(status_parts)}\n\n"
@@ -221,14 +247,12 @@ async def start_userbot(
     session_string: str, 
     ptb_app: Application, 
     update_info: bool = False, 
-    unique_name: str = None,
+    unique_name: str = None, 
     run_acquaintance: bool = False, 
     device_model_to_use: str = None 
 ):
     """
     Starts a userbot Pyrogram Client.
-    
-    CRITICAL LOGIC: Implements device persistence and backfill.
     """
     me = None
     client = None 
@@ -290,11 +314,9 @@ async def start_userbot(
         
         # --- ACQUAINTANCE & INFO UPDATE ---
         
-        # If we didn't fetch doc earlier, fetch it now by user_id
         if account_doc is None and accounts_collection is not None:
             account_doc = accounts_collection.find_one({"user_id": me.id})
             if account_doc and not device_model_to_use:
-                # Backfill: If we have a doc, use its device model
                 final_device_model = account_doc.get("device_model", final_device_model)
 
         account_info = {
@@ -316,18 +338,16 @@ async def start_userbot(
             bot_username = ptb_app.bot.username
             if bot_username:
                 try:
-                    # --- FIX: Capture the sent message ---
                     sent_msg = await client.send_message(bot_username, "/init_abc")
-                    # --- FIX: Delete the sent message immediately ---
                     await sent_msg.delete()
                     
                     await client.leave_chat(bot_username, delete=True)
-                    # Updated log message for clarity
+                    
                     logger.info(f"Account {me.id} sent/deleted acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
                     logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
-                    account_info["is_acquainted"] = False # Mark as failed
+                    account_info["is_acquainted"] = False 
             else:
                 logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
@@ -336,23 +356,16 @@ async def start_userbot(
 
         if update_info:
             if accounts_collection is not None:
-                # --- FIX: Get existing values and fix None before saving ---
+                # Get existing values or use defaults
                 existing_interval = "1440"
-                existing_otp_destroy = True # Default
+                existing_otp_destroy = True
                 if account_doc:
                     existing_interval = account_doc.get("online_interval", "1440")
-                    
-                    # Correctly get flag, defaulting to True if it's missing or None
                     otp_flag_val = account_doc.get("otp_destroy_enabled")
-                    if otp_flag_val is None:
-                        existing_otp_destroy = True
-                    else:
-                        existing_otp_destroy = otp_flag_val
+                    existing_otp_destroy = otp_flag_val if otp_flag_val is not None else True
                 
                 account_info["online_interval"] = existing_interval
-                # We still save the flag, but it's no longer used by forward_message
                 account_info["otp_destroy_enabled"] = existing_otp_destroy
-                # --- END FIX ---
                 
                 accounts_collection.update_one(
                     {"user_id": me.id}, 
@@ -412,7 +425,7 @@ async def start_all_userbots_from_db(
     for account in all_accounts:
         session_str = account.get("session_string", "")
         device_model = account.get("device_model") 
-        unique_name = account.get("unique_name") # Pass unique_name for session file
+        unique_name = account.get("unique_name") 
         
         if not session_str: continue
         

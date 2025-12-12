@@ -4,14 +4,17 @@ from config import (
     OWNER_ID, logger, active_userbots, accounts_collection
 )
 from telegram.constants import ParseMode
-from utils import parse_interval # <-- NEW IMPORT
-import traceback # <-- NEW IMPORT
+from utils import parse_interval
+import traceback
+# --- FIX: Import the errors used in the except block to prevent crashes ---
+from pyrogram.errors import AuthKeyUnregistered, UserDeactivated 
 
-# --- NEW JOB ---
+# --- ONLINE INTERVAL JOB (Efficiency Check) ---
 async def online_interval_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Job callback to update online status for a userbot.
     This job schedules itself to run again based on the DB interval.
+    Uses get_me() for a light check.
     """
     job_data = context.job.data
     user_id = job_data['user_id']
@@ -70,7 +73,7 @@ async def online_interval_job(context: ContextTypes.DEFAULT_TYPE):
             data={'user_id': user_id}, 
             name=f"interval_{user_id}"
         )
-# --- END NEW JOB ---
+# --- END ONLINE INTERVAL JOB ---
 
 async def resume_forwarding_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback to resume OTP processing for a single user."""

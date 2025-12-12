@@ -1,19 +1,40 @@
 import os
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
 # --- Basic Setup & Configuration ---
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# Configure Logging with Rotation (5 Minutes)
+# This prevents the log file from growing indefinitely.
+log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Rotate every 300 seconds (5 minutes). 
+# backupCount=1 keeps one backup file, ensuring we don't store logs older than ~5-10 mins.
+LOG_FILE_PATH = "app.log"
+file_handler = TimedRotatingFileHandler(LOG_FILE_PATH, when="S", interval=300, backupCount=1)
+file_handler.setFormatter(log_formatter)
+root_logger.addHandler(file_handler)
+
+# Console handler for Docker/VPS logs
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+root_logger.addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
+logger.info("Logging configured with 5-minute rotation for 'app.log'.")
+
 
 # --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID"))
 
-# --- MODIFIED: Hardcoded Telegram Desktop Values with exact names ---
+# --- Hardcoded Telegram Desktop Values with exact names ---
 TD_API_ID = 2040
 TD_API_HASH = "b18441a1ff607e10a989891a5462e627"
 TD_SYSTEM_VERSION = "Windows 11"
@@ -40,15 +61,11 @@ try:
     
     # --- FIX: Ensure database indexes to prevent duplicates ---
     try:
-        # Create a unique index on user_id
         accounts_collection.create_index("user_id", unique=True)
-        # Create a "sparse" unique index on unique_name.
-        # This allows multiple documents to NOT have a unique_name (value=None),
-        # but prevents two documents from having the SAME unique_name.
         accounts_collection.create_index("unique_name", unique=True, sparse=True)
         logger.info("Successfully connected to MongoDB and verified/created indexes.")
     except Exception as e:
-        logger.warning(f"Could not create/verify indexes (this may happen on read-only DBs or if duplicates already exist): {e}")
+        logger.warning(f"Could not create/verify indexes: {e}")
     # --- END FIX ---
 
 except Exception as e:
@@ -59,7 +76,7 @@ except Exception as e:
     accounts_collection = None
 
 active_userbots = {}
-paused_forwarding = set() # This set now controls OTP processing
+paused_forwarding = set()
 paused_notifications = set()
 
 # --- State definitions for ConversationHandler ---
