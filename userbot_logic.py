@@ -2,7 +2,7 @@ import asyncio
 import random
 import traceback
 import time
-import gc # <-- NEW: For manual garbage collection
+import gc 
 from functools import partial
 
 from pyrogram import Client, filters
@@ -25,7 +25,12 @@ from config import (
 )
 from utils import generate_device_name, escape_html
 
-# --- NEW: Keep-alive Job Management ---
+# --- NEW: Global Lock to prevent CPU Spikes ---
+# This ensures only ONE bot performs the heavy stop/start action at a time.
+# This is critical for preventing VPS crashes.
+online_action_sem = asyncio.Semaphore(1)
+
+# --- Keep-alive Job Management ---
 active_online_jobs = {}
 
 async def perform_online_action(context: dict):
@@ -33,104 +38,93 @@ async def perform_online_action(context: dict):
     Job callback to send/delete message, wait 10s ONLINE, STOP, wait 3s OFFLINE,
     then START and RE-ADD THE OTP HANDLER.
     
-    OPTIMIZED: Fixes memory leak by removing old handlers and forcing GC.
+    OPTIMIZED: Uses a Semaphore to prevent CPU spikes and fixes memory leaks.
     """
-    # Get both client and ptb_app from context
     client: Client = context.job.data['client']
     ptb_app: Application = context.job.data['ptb_app']
     
-    # Safely get user ID for logging
     user_id_log = client.me.id if client.me else "Unknown"
 
-    try:
-        # 1. Check connection
-        if not client.is_connected:
-            logger.warning(f"Client {user_id_log} not connected. Attempting to start...")
-            await client.start() # Try to restart it
-        
-        # 2. Perform online action
-        msg = await client.send_message("me", f"Online action: {int(time.time())}")
-        await msg.delete()
-        logger.info(f"Successfully performed online action (send/delete) for {user_id_log}")
-
-        # Wait 10 seconds while ONLINE
-        await asyncio.sleep(10)
-
-        # 3. Go Offline (fully stop client)
-        await client.stop()
-        logger.info(f"Client {user_id_log} stopped (Offline state).")
-
-        # Wait 3 seconds WHILE offline
-        await asyncio.sleep(3)
-
-        # 4. Connect back again
-        await client.start()
-        
-        # 5. CRITICAL FIX: Re-add the forwarder handler
-        # MEMORY LEAK FIX: Retrieve old handler from job data and remove it
-        old_handler = context.job.data.get('current_handler')
-        if old_handler:
+    # --- THROTTLING: Wait for permission to run heavy tasks ---
+    async with online_action_sem:
+        try:
+            # 1. Check connection
+            if not client.is_connected:
+                logger.warning(f"Client {user_id_log} not connected. Attempting to start...")
+                await client.start() 
+            
+            # 2. Perform online action
             try:
-                # Remove the specific handler instance we created last time
-                client.remove_handler(old_handler, group=0)
-                logger.info(f"Successfully removed old handler for {user_id_log}.")
+                msg = await client.send_message("me", f"Online action: {int(time.time())}")
+                await msg.delete()
+                logger.info(f"[{user_id_log}] Online action (send/delete) done.")
             except Exception as e:
-                logger.warning(f"Could not remove old handler for {user_id_log}: {e}")
-        
-        # Create new handler
-        handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        source_chat_id = await get_source_chat()
-        
-        new_handler = MessageHandler(
-            handler_with_context, 
-            filters.chat(source_chat_id) & ~filters.service
-        )
-        
-        client.add_handler(new_handler)
-        
-        # Save this handler instance so we can remove it next time
-        context.job.data['current_handler'] = new_handler
-        
-        logger.info(f"Client {user_id_log} restarted and new handler re-added (Online state).")
+                logger.warning(f"[{user_id_log}] Send/Delete failed: {e}")
 
-    except Exception as e:
-        logger.warning(f"Failed to perform online action cycle for {user_id_log}: {e}")
-        # Ensure client is running for next time, if possible
-        if not client.is_connected:
-            try:
-                logger.info(f"Attempting recovery restart for {user_id_log} after error...")
-                await client.start()
-                
-                # CRITICAL FIX (in error block): Re-add handler on recovery
-                old_handler = context.job.data.get('current_handler')
-                if old_handler:
-                    try: client.remove_handler(old_handler, group=0)
-                    except: pass
+            # Wait 10 seconds while ONLINE
+            await asyncio.sleep(10)
 
-                handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-                source_chat_id = await get_source_chat()
-                
-                new_handler = MessageHandler(
-                    handler_with_context, 
-                    filters.chat(source_chat_id) & ~filters.service
-                )
-                client.add_handler(new_handler)
-                context.job.data['current_handler'] = new_handler
-                
-            except Exception as e2:
-                logger.error(f"Recovery restart failed for {user_id_log}: {e2}")
+            # 3. Go Offline (fully stop client)
+            # This is the heavy part. Since we are inside the Semaphore, 
+            # no other bot is doing this right now.
+            await client.stop()
+            logger.info(f"[{user_id_log}] Stopped (Offline state).")
 
-    finally:
-        # Resource Frugality: Force garbage collection after heavy operation
-        # This is a key step to aggressively free up Python/Pyrogram memory.
-        gc.collect()
+            # Wait 3 seconds WHILE offline
+            await asyncio.sleep(3)
+
+            # 4. Connect back again
+            await client.start()
+            
+            # 5. Re-add the forwarder handler (Memory Leak Fix)
+            old_handler = context.job.data.get('current_handler')
+            if old_handler:
+                try:
+                    client.remove_handler(old_handler, group=0)
+                except Exception:
+                    pass
+            
+            handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
+            source_chat_id = await get_source_chat()
+            
+            new_handler = MessageHandler(
+                handler_with_context, 
+                filters.chat(source_chat_id) & ~filters.service
+            )
+            
+            client.add_handler(new_handler)
+            context.job.data['current_handler'] = new_handler
+            
+            logger.info(f"[{user_id_log}] Restarted and handler re-added.")
+            
+            # Add a small buffer delay to let CPU cool down before releasing lock
+            await asyncio.sleep(2)
+
+        except Exception as e:
+            logger.warning(f"Failed to perform online action cycle for {user_id_log}: {e}")
+            if not client.is_connected:
+                try:
+                    logger.info(f"Attempting recovery restart for {user_id_log}...")
+                    await client.start()
+                    
+                    # Recovery: Re-add handler
+                    handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
+                    source_chat_id = await get_source_chat()
+                    new_handler = MessageHandler(handler_with_context, filters.chat(source_chat_id) & ~filters.service)
+                    client.add_handler(new_handler)
+                    context.job.data['current_handler'] = new_handler
+                except Exception as e2:
+                    logger.error(f"Recovery restart failed for {user_id_log}: {e2}")
+
+        finally:
+            gc.collect()
 
 
 async def schedule_online_job(client: Client, interval_str: str, ptb_app: Application):
     """Schedules the repeating online action job."""
     user_id = client.me.id
     if user_id in active_online_jobs:
-        stop_online_job(user_id) # Stop existing job if any
+        stop_online_job(user_id) 
     
     if not interval_str:
         interval_str = '1440'
@@ -138,7 +132,6 @@ async def schedule_online_job(client: Client, interval_str: str, ptb_app: Applic
     try:
         if "-" in interval_str:
             min_val, max_val = map(int, interval_str.split("-"))
-            # Get a random interval in seconds
             interval_seconds = random.randint(min_val * 60, max_val * 60)
         else:
             interval_seconds = int(interval_str) * 60
@@ -147,23 +140,24 @@ async def schedule_online_job(client: Client, interval_str: str, ptb_app: Applic
         logger.error(f"Invalid interval string '{interval_str}' for {user_id}. Defaulting to 1440min.")
         interval_seconds = 1440 * 60
 
-    # Do not schedule job if interval is 1440 minutes (24 hours)
     if interval_seconds == 1440 * 60:
         logger.info(f"Interval for {user_id} is default (1440). No online job scheduled.")
         return
 
-    # Pass ptb_app and initialize 'current_handler' as None
     job_context = {'client': client, 'ptb_app': ptb_app, 'current_handler': None}
     
+    # Randomize start time to further spread load
+    random_first_start = random.randint(30, 300) 
+
     job = ptb_app.job_queue.run_repeating(
         perform_online_action,
         interval=interval_seconds,
-        first=random.randint(10, 60), # Start after 10-60 seconds
+        first=random_first_start,
         data=job_context,
         name=f"online_job_{user_id}"
     )
     active_online_jobs[user_id] = job
-    logger.info(f"Scheduled online job for {user_id} every {interval_seconds} seconds.")
+    logger.info(f"Scheduled online job for {user_id} every {interval_seconds}s (start in {random_first_start}s).")
 
 def stop_online_job(user_id: int):
     """Stops and removes the online job for a user."""
@@ -175,14 +169,9 @@ def stop_online_job(user_id: int):
 
 
 async def get_source_chat():
-    """Returns the chat ID for the Telegram service messages."""
     return 777000 
 
 async def forward_message(client: Client, message: Message, target_chat: str):
-    """
-    Copies the message to target_chat (Bot PM)
-    and attempts to call InvalidateSignInCodes.
-    """
     if client.me.id in paused_forwarding: 
         logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
         return
@@ -191,9 +180,7 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         if client.me:
             await message.copy(chat_id=target_chat)
         
-        # Invalidate sign-in codes to destroy the OTP immediately
         try:
-            # We assume InvalidateSignInCodes is either a method or a bound function
             if hasattr(client, "InvalidateSignInCodes"):
                 await client.InvalidateSignInCodes()
                 logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
@@ -206,7 +193,6 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
 
 async def send_notification(client: Client, message: Message, ptb_app: Application):
-    """Sends a notification to the owner about the received OTP message."""
     if OWNER_ID in paused_notifications: return
     
     status_parts = ["✅ OTP Active", "✅ Notify Active"]
@@ -229,7 +215,6 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
         logger.error(f"Failed to send notification for message {message.id}: {e}")
 
 async def forwarder_handler(client: Client, message: Message, ptb_app: Application):
-    """Pyrogram MessageHandler callback."""
     logger.info(f"Handler received message {message.id} from chat ID: {message.chat.id}. Processing...")
 
     bot_username = ptb_app.bot.username
@@ -237,7 +222,6 @@ async def forwarder_handler(client: Client, message: Message, ptb_app: Applicati
         logger.error("Could not find management bot's username. Cannot forward OTP.")
         return
 
-    # Run forwarding (OTP destruction) and notification concurrently
     asyncio.gather(
         forward_message(client, message, bot_username),
         send_notification(client, message, ptb_app)
@@ -251,15 +235,11 @@ async def start_userbot(
     run_acquaintance: bool = False, 
     device_model_to_use: str = None 
 ):
-    """
-    Starts a userbot Pyrogram Client.
-    """
     me = None
     client = None 
     account_doc = None
     final_device_model = device_model_to_use
     
-    # --- Persistence/Backfill Logic ---
     if final_device_model is None:
         if accounts_collection is not None and session_string:
             account_doc = accounts_collection.find_one({"session_string": session_string})
@@ -302,17 +282,13 @@ async def start_userbot(
             return "already_exists", None, "This user is already running."
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
-        
         source_chat_id = await get_source_chat()
-        
         client.add_handler(MessageHandler(
             handler_with_context, 
             filters.chat(source_chat_id) & ~filters.service
         ))
 
         active_userbots[me.id] = client
-        
-        # --- ACQUAINTANCE & INFO UPDATE ---
         
         if account_doc is None and accounts_collection is not None:
             account_doc = accounts_collection.find_one({"user_id": me.id})
@@ -340,23 +316,17 @@ async def start_userbot(
                 try:
                     sent_msg = await client.send_message(bot_username, "/init_abc")
                     await sent_msg.delete()
-                    
                     await client.leave_chat(bot_username, delete=True)
-                    
-                    logger.info(f"Account {me.id} sent/deleted acquaintance message and deleted chat with @{bot_username}")
                     account_info["is_acquainted"] = True
                 except Exception as e:
-                    logger.warning(f"Could not send/delete acquaintance chat for {me.id} with @{bot_username}: {e}")
                     account_info["is_acquainted"] = False 
             else:
-                logger.warning(f"No bot_username, skipping acquaintance for {me.id}")
                 account_info["is_acquainted"] = False
         else:
             account_info["is_acquainted"] = current_acquainted_status 
 
         if update_info:
             if accounts_collection is not None:
-                # Get existing values or use defaults
                 existing_interval = "1440"
                 existing_otp_destroy = True
                 if account_doc:
@@ -372,10 +342,7 @@ async def start_userbot(
                     {"$set": account_info}, 
                     upsert=True
                 )
-            else:
-                logger.error(f"Database not connected. Could not save account info for {me.id}")
         
-        # --- NEW: Schedule Online Job ---
         final_interval_str = "1440"
         if 'online_interval' in account_info:
             final_interval_str = account_info['online_interval']
@@ -383,7 +350,6 @@ async def start_userbot(
             final_interval_str = account_doc.get("online_interval", "1440")
             
         await schedule_online_job(client, final_interval_str, ptb_app)
-        # --- End ---
                 
         return "success", me, "Successfully started."
     
@@ -397,17 +363,11 @@ async def start_userbot(
         error_detail = f"Flood wait of {e.value} seconds. Too many login attempts."
         return "flood_wait", None, error_detail
     except Exception as e:
-        full_traceback = traceback.format_exc()
-        logger.error(f"An unexpected error in start_userbot: {e}\n{full_traceback}")
-        if "SESSION_STRING_INVALID" in str(e).upper():
-            error_detail = "The session string format is invalid."
-            return "invalid_session", None, error_detail
         error_detail = f"Unexpected Error: {e}"
         return "error", None, error_detail
     finally:
         if 'client' in locals() and client and client.is_connected:
-            is_active = me and me.id in active_userbots
-            if not is_active:
+            if not (me and me.id in active_userbots):
                 await client.stop()
 
 async def start_all_userbots_from_db(
