@@ -377,7 +377,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mention = f"<a href=\"tg://user?id={user_id}\">{display_name}</a>" if user_id else display_name
         
         phone = acc.get('phone_number')
-        phone_str = f"+{escape_html(phone)}" if phone else "No Phone"
+        phone_str = f"+<code>{escape_html(phone)}</code>" if phone else "No Phone"
         
         interval = acc.get('online_interval', '1440')
         interval_str = f" (⌚ {interval}m)" if interval != '1440' else ""
