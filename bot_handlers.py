@@ -26,7 +26,8 @@ from config import (
 # --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
     owner_only, escape_html, clean_session_string, 
-    get_account_from_arg, generate_device_name, COMMAND_FALLBACKS
+    get_account_from_arg, generate_device_name, COMMAND_FALLBACKS,
+    sanitize_unique_name
 )
 from userbot_logic import (
     start_userbot, start_all_userbots_from_db,
@@ -114,7 +115,8 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     identifier = context.args[0]
-    new_name = context.args[1].lower()
+    # --- FIX: Sanitize input ---
+    new_name = sanitize_unique_name(context.args[1])
     
     account = await get_account_from_arg(identifier)
     if not account:
@@ -139,8 +141,8 @@ async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text(
-        f"✔️ name id for <b>{escape_html(account.get('first_name'))}</b> "
-        f"(<code>{account['user_id']}</code>) has been set to <code>{escape_html(new_name)}</code>.",
+        f"✔️ Account <b>{escape_html(account.get('first_name'))}</b> "
+        f"(<code>{account['user_id']}</code>) renamed to <code>{escape_html(new_name)}</code>.",
         parse_mode=ParseMode.HTML
     )
 
@@ -562,7 +564,10 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
 @owner_only
 async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name and asks for session string."""
-    unique_name = update.message.text.strip().split()[0].lower()
+    
+    # --- FIX: Sanitize input ---
+    raw_input = update.message.text.strip().split()[0]
+    unique_name = sanitize_unique_name(raw_input)
     
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available. Please /cancel and try again.")
@@ -574,11 +579,11 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
         {"unique_name": unique_name}
     )
     if account:
-        await update.message.reply_text("That name is already taken. Please choose another one.")
+        await update.message.reply_text(f"The name '{unique_name}' is already taken. Please choose another one.")
         return UNIQUE_NAME_PASTE 
         
     context.user_data['unique_name'] = unique_name
-    await update.message.reply_text("Great. Now please paste the session string.")
+    await update.message.reply_text(f"Name set to: <b>{unique_name}</b>\nGreat. Now please paste the session string.", parse_mode=ParseMode.HTML)
     return AWAIT_STRING_PASTE
 
 @owner_only

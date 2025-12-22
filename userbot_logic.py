@@ -14,6 +14,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 from telegram.constants import ParseMode
 from telegram.ext import Application
+from pymongo.errors import DuplicateKeyError
 
 # Import from our own modules
 from config import (
@@ -23,7 +24,7 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-from utils import generate_device_name, escape_html
+from utils import generate_device_name, escape_html, sanitize_unique_name
 
 # --- NEW: Global Lock to prevent CPU Spikes ---
 # This ensures only ONE bot performs the heavy stop/start action at a time.
@@ -240,6 +241,7 @@ async def start_userbot(
     account_doc = None
     final_device_model = device_model_to_use
     
+    # 1. Determine Device Model
     if final_device_model is None:
         if accounts_collection is not None and session_string:
             account_doc = accounts_collection.find_one({"session_string": session_string})
@@ -248,13 +250,18 @@ async def start_userbot(
         
         if final_device_model is None:
             final_device_model = generate_device_name()
+            # If we generated a new one, we should probably save it
             update_info = True
 
     if final_device_model is None:
         final_device_model = "Unknown Device" 
     
+    # 2. Sanitize and prepare Unique Name (if provided)
+    final_unique_name = sanitize_unique_name(unique_name) if unique_name else None
+
     try:
-        session_prefix = unique_name if unique_name else session_string[-8:]
+        # Use sanitized name for the internal session name
+        session_prefix = final_unique_name if final_unique_name else f"sess_{random.randint(1000,9999)}"
         client = Client(
             name=f"session_{session_prefix}", 
             api_id=TD_API_ID,
@@ -277,9 +284,16 @@ async def start_userbot(
         await client.start()
         me = await client.get_me()
         
+        # 4. ROBUST EXISTING CHECK
+        # If this User ID is already running, find out WHO it is running as.
         if me.id in active_userbots:
             await client.stop() 
-            return "already_exists", None, "This user is already running."
+            
+            # Find the name of the ALREADY running bot
+            existing_doc = accounts_collection.find_one({"user_id": me.id})
+            existing_name = existing_doc.get("unique_name", "Unknown") if existing_doc else "Unknown"
+            
+            return "already_exists", None, f"User ID {me.id} is already running as '{existing_name}'. You cannot add the same account twice."
         
         handler_with_context = partial(forwarder_handler, ptb_app=ptb_app)
         source_chat_id = await get_source_chat()
@@ -288,13 +302,34 @@ async def start_userbot(
             filters.chat(source_chat_id) & ~filters.service
         ))
 
-        active_userbots[me.id] = client
-        
+        # 6. Prepare DB Info
         if account_doc is None and accounts_collection is not None:
             account_doc = accounts_collection.find_one({"user_id": me.id})
-            if account_doc and not device_model_to_use:
-                final_device_model = account_doc.get("device_model", final_device_model)
+        
+        # If we didn't have a name passed in, try to keep the existing one
+        if not final_unique_name and account_doc:
+             final_unique_name = account_doc.get("unique_name")
 
+        # 7. CRITICAL: COLLISION CHECK & AUTO-RENAME
+        # We must ensure final_unique_name is NOT taken by a DIFFERENT user_id
+        if update_info and accounts_collection is not None and final_unique_name:
+            collision_check = accounts_collection.find_one({"unique_name": final_unique_name})
+            
+            if collision_check and collision_check.get("user_id") != me.id:
+                # NAME IS TAKEN by someone else!
+                logger.warning(f"Name collision! '{final_unique_name}' is taken by {collision_check.get('user_id')}. Renaming current ({me.id})...")
+                
+                # Append a random suffix to make it unique
+                new_name = f"{final_unique_name}{random.randint(1, 99)}"
+                # Recursive check (simple version)
+                if accounts_collection.find_one({"unique_name": new_name}):
+                     new_name = f"{final_unique_name}{random.randint(100, 999)}"
+                
+                final_unique_name = new_name
+                logger.info(f"Resolved collision. New name: {final_unique_name}")
+
+        active_userbots[me.id] = client
+        
         account_info = {
             "user_id": me.id, 
             "first_name": me.first_name, 
@@ -303,8 +338,8 @@ async def start_userbot(
             "session_string": session_string,
             "device_model": final_device_model,
         }
-        if unique_name:
-            account_info["unique_name"] = unique_name
+        if final_unique_name:
+            account_info["unique_name"] = final_unique_name
             
         current_acquainted_status = False
         if account_doc:
@@ -325,6 +360,7 @@ async def start_userbot(
         else:
             account_info["is_acquainted"] = current_acquainted_status 
 
+        # 8. DB Update with Duplicate Handling
         if update_info:
             if accounts_collection is not None:
                 existing_interval = "1440"
@@ -337,11 +373,26 @@ async def start_userbot(
                 account_info["online_interval"] = existing_interval
                 account_info["otp_destroy_enabled"] = existing_otp_destroy
                 
-                accounts_collection.update_one(
-                    {"user_id": me.id}, 
-                    {"$set": account_info}, 
-                    upsert=True
-                )
+                try:
+                    accounts_collection.update_one(
+                        {"user_id": me.id}, 
+                        {"$set": account_info}, 
+                        upsert=True
+                    )
+                except DuplicateKeyError as e:
+                    # If we still hit a duplicate key (race condition), handle it
+                    logger.error(f"Duplicate Key Error on upsert for {me.id}: {e}")
+                    
+                    # If the error is on unique_name, force a rename and retry once
+                    if "unique_name" in str(e):
+                        safe_name = f"user{me.id}_{random.randint(10,99)}"
+                        account_info["unique_name"] = safe_name
+                        logger.info(f"Retrying upsert with fallback name: {safe_name}")
+                        accounts_collection.update_one(
+                            {"user_id": me.id}, 
+                            {"$set": account_info}, 
+                            upsert=True
+                        )
         
         final_interval_str = "1440"
         if 'online_interval' in account_info:
@@ -399,7 +450,7 @@ async def start_all_userbots_from_db(
         if status == "success":
             success_count += 1
         else:
-            acc_id = account.get('first_name') or account.get('user_id') or f"...{session_str[-4:]}"
+            acc_id = unique_name or account.get('first_name') or account.get('user_id') or f"...{session_str[-4:]}"
             error_details.append(f"• <b>{escape_html(acc_id)}:</b> {escape_html(detail)}")
 
     logger.info(f"Started {success_count}/{len(all_accounts)} userbots from DB.")

@@ -8,6 +8,30 @@ from telegram.ext import ContextTypes, ConversationHandler, CommandHandler
 # Import from config
 from config import OWNER_ID, accounts_collection, logger
 
+# --- NEW: Strict Sanitization ---
+def sanitize_unique_name(name: str) -> str:
+    """
+    Enforces strict naming rules:
+    1. Lowercase only.
+    2. Alphanumeric only (a-z, 0-9).
+    3. No spaces or special characters.
+    4. Fallback if empty.
+    """
+    if not name:
+        return f"unnamed{random.randint(1000,9999)}"
+    
+    # Remove anything that is NOT a-z, A-Z, or 0-9
+    clean = re.sub(r'[^a-zA-Z0-9]', '', name)
+    
+    # Convert to lowercase
+    clean = clean.lower()
+    
+    if not clean:
+        return f"user{random.randint(1000,9999)}"
+        
+    return clean
+# --- END NEW ---
+
 # --- NEW FUNCTION ---
 def parse_interval(interval_str: str) -> int:
     """
@@ -104,8 +128,10 @@ async def get_account_from_arg(arg: str):
         pass
     
     if account is None:
-        # Search by lowercase unique_name
-        account = accounts_collection.find_one({"unique_name": arg.lower()})
+        # Search by sanitized unique_name
+        # --- FIX: Use sanitization here ---
+        clean_arg = sanitize_unique_name(arg)
+        account = accounts_collection.find_one({"unique_name": clean_arg})
         
     return account
 

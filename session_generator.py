@@ -23,7 +23,8 @@ from config import (
 )
 # --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
-    owner_only, generate_device_name, escape_html, COMMAND_FALLBACKS
+    owner_only, generate_device_name, escape_html, COMMAND_FALLBACKS,
+    sanitize_unique_name
 )
 from userbot_logic import start_userbot # To add the account after selection
 
@@ -67,12 +68,14 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name, selects persistent device model, and asks for phone number."""
-    # Force unique_name to lowercase
-    unique_name = update.message.text.strip().split()[0].lower()
+    
+    # --- FIX: Sanitize input ---
+    raw_input = update.message.text.strip().split()[0]
+    unique_name = sanitize_unique_name(raw_input)
     
     # Check if name is taken (now case-insensitive)
     if accounts_collection.find_one({"unique_name": unique_name}):
-        await update.message.reply_text("That name is already taken. Please choose another one.")
+        await update.message.reply_text(f"The name '{unique_name}' is already taken. Please choose another one.")
         return UNIQUE_NAME_GEN # Stay in this state
 
     # --- CRITICAL PERSISTENCE FIX: Select the device model ONCE ---
@@ -81,7 +84,7 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     context.user_data['unique_name'] = unique_name
     context.user_data['persistent_device_model'] = persistent_device_model
     
-    await update.message.reply_text("Great. Now please send the phone number in international format (e.g., +1234567890).")
+    await update.message.reply_text(f"Name set to: <b>{unique_name}</b>\nGreat. Now please send the phone number in international format (e.g., +1234567890).", parse_mode=ParseMode.HTML)
     return PHONE
 
 @owner_only
