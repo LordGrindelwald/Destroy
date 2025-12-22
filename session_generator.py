@@ -21,12 +21,11 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-# --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
     owner_only, generate_device_name, escape_html, COMMAND_FALLBACKS,
     sanitize_unique_name
 )
-from userbot_logic import start_userbot # To add the account after selection
+from userbot_logic import start_userbot 
 
 @owner_only
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,13 +35,9 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     message = update.message or update.callback_query.message
     
-    # --- FIX: Route /add vs /add -sess ---
     is_callback = update.callback_query is not None
     if not is_callback and context.args and context.args[0] == '-sess':
-        # User wants /add -sess
-        # This is NOT part of the conversation, just show buttons
         context.user_data.clear()
-        # --- FIX: Removed "Back to Settings" button ---
         keyboard = [
             [InlineKeyboardButton("📝 Paste Single String", callback_data="add_single")],
             [InlineKeyboardButton("📋 Paste Multiple Strings", callback_data="add_multiple")],
@@ -55,10 +50,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please choose a method to add a new userbot account via session string."
         )
         await message.reply_html(message_text, reply_markup=reply_markup)
-        return ConversationHandler.END # End this conversation
-    # --- END FIX ---
+        return ConversationHandler.END
 
-    # Default to phone flow (/add or callback)
     if update.callback_query:
         await update.callback_query.answer()
         
@@ -69,17 +62,13 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name, selects persistent device model, and asks for phone number."""
     
-    # --- FIX: Sanitize input ---
     raw_input = update.message.text.strip().split()[0]
     unique_name = sanitize_unique_name(raw_input)
     
-    # Check if name is taken (now case-insensitive)
     if accounts_collection.find_one({"unique_name": unique_name}):
         await update.message.reply_text(f"The name '{unique_name}' is already taken. Please choose another one.")
-        return UNIQUE_NAME_GEN # Stay in this state
+        return UNIQUE_NAME_GEN 
 
-    # --- CRITICAL PERSISTENCE FIX: Select the device model ONCE ---
-    # Select the permanent device model now and store it in user_data
     persistent_device_model = generate_device_name()
     context.user_data['unique_name'] = unique_name
     context.user_data['persistent_device_model'] = persistent_device_model
@@ -92,16 +81,15 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
-    # Retrieve the persistent device model chosen in the previous step
     persistent_device_model = context.user_data.get('persistent_device_model')
     
-    # Use unique user ID for temporary file session name
+    # --- FIX: ADDED in_memory=True ---
     client = Client(
         name=f"temp_gen_{update.effective_user.id}", 
+        in_memory=True, # <--- THIS FIXES THE CACHE ISSUE
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
         workers=1,
-        # CRITICAL PERSISTENCE FIX: Use the selected persistent device model
         device_model=persistent_device_model, 
         system_version=TD_SYSTEM_VERSION,
         app_version=TD_APP_VERSION,
@@ -109,6 +97,8 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_lang_code=TD_SYSTEM_LANG_CODE,
         lang_pack=TD_LANG_PACK
     )
+    # ---------------------------------
+
     try:
         await asyncio.wait_for(client.connect(), timeout=30.0)
     except Exception as e:
@@ -139,7 +129,6 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Signed in! Generating session and adding account...")
         session_string = await client.export_session_string()
         
-        # CRITICAL PERSISTENCE FIX: Pass the persistent device model to start_userbot
         persistent_device_model = context.user_data.get('persistent_device_model')
 
         status, user_info, detail = await start_userbot(
@@ -148,7 +137,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_info=True, 
             unique_name=unique_name,
             run_acquaintance=True,
-            device_model_to_use=persistent_device_model # Pass the model!
+            device_model_to_use=persistent_device_model 
         )
         
         if status == "success":
@@ -157,7 +146,6 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
         
         await update.message.delete()
-        # Ensure temporary client is disconnected before clearing context
         if client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
@@ -183,7 +171,6 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Password correct! Generating session and adding account...")
         session_string = await client.export_session_string()
         
-        # CRITICAL PERSISTENCE FIX: Pass the persistent device model to start_userbot
         persistent_device_model = context.user_data.get('persistent_device_model')
 
         status, user_info, detail = await start_userbot(
@@ -192,7 +179,7 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_info=True, 
             unique_name=unique_name,
             run_acquaintance=True,
-            device_model_to_use=persistent_device_model # Pass the model!
+            device_model_to_use=persistent_device_model 
         )
         
         if status == "success":
@@ -219,7 +206,6 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
         if client and client.is_connected: await client.disconnect()
     context.user_data.clear()
     
-    # --- FIX: Edit message on cancel ---
     cancel_text = "✖️ Add account process cancelled."
     if update.callback_query:
         await update.callback_query.answer()
@@ -229,14 +215,13 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.callback_query.message.reply_text(cancel_text)
     else:
         await update.message.reply_text(cancel_text)
-    # --- END FIX ---
     
     return ConversationHandler.END
 
 gen_conv = ConversationHandler(
     entry_points=[
-        CommandHandler("add", generate_command), # <-- FIX: Changed from "generate"
-        CallbackQueryHandler(generate_command, pattern="^call_add_command$") # <-- FIX: Changed from "call_generate"
+        CommandHandler("add", generate_command), 
+        CallbackQueryHandler(generate_command, pattern="^call_add_command$") 
     ],
     states={
         UNIQUE_NAME_GEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_unique_name_for_generate)],
@@ -246,7 +231,7 @@ gen_conv = ConversationHandler(
     },
     fallbacks=[
         CommandHandler("cancel", cancel_command_conv),
-        *COMMAND_FALLBACKS # <-- BUGFIX
+        *COMMAND_FALLBACKS 
     ],
     conversation_timeout=300,
 )
