@@ -1,7 +1,7 @@
 import asyncio
 import random
 from pyrogram import Client
-from pyrogram.errors import SessionPasswordNeeded
+from pyrogram.errors import SessionPasswordNeeded, PasswordHashInvalid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     CommandHandler,
@@ -151,7 +151,12 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     except SessionPasswordNeeded:
-        await msg.edit_text("2FA is enabled. Please send your password.")
+        # --- NEW: Get Hint and Init Retry Counter ---
+        hint = await client.get_password_hint()
+        context.user_data['password_attempts'] = 0
+        
+        hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
+        await msg.edit_text(f"🔐 2FA is enabled{hint_text}.\nPlease send your password.")
         return PASSWORD
     except Exception as e:
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
@@ -191,7 +196,21 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if client and client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
+
+    except PasswordHashInvalid:
+        # --- NEW: Retry Logic ---
+        attempts = context.user_data.get('password_attempts', 0) + 1
+        context.user_data['password_attempts'] = attempts
         
+        if attempts < 3:
+            await msg.edit_text(f"❌ Incorrect password (Attempt {attempts}/3).\nPlease try again.")
+            return PASSWORD
+        else:
+            await msg.edit_text("❌ Incorrect password. Too many attempts (3/3). Cancelled.")
+            if client and client.is_connected: await client.disconnect()
+            context.user_data.clear()
+            return ConversationHandler.END
+
     except Exception as e:
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
         if client and client.is_connected: await client.disconnect()
