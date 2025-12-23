@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
-from pyrogram.errors import PasswordHashInvalid, CloudPasswordNeeded, BadRequest
+from pyrogram.errors import PasswordHashInvalid, BadRequest
 
 # Import from our own modules
 from config import (
@@ -1948,12 +1948,7 @@ async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TY
                     # If we don't have it, try without (unlikely to work if enabled, but valid attempt)
                     # Note: Pyrogram `disable_cloud_password` usually requires a password if one is set.
                     # We can try catching the specific error.
-                    try:
-                        await client.disable_cloud_password() 
-                        results.append(f"✅ {account_name}: 2FA Disabled (No pwd required).")
-                    except (PasswordHashInvalid, BadRequest, CloudPasswordNeeded):
-                        results.append(f"⚠️ {account_name}: Failed. 2FA is on but I don't have the stored password. Use /update2fa.")
-                        continue
+                    except (PasswordHashInvalid, BadRequest):
 
             else:
                 # Enabling/Changing 2FA
