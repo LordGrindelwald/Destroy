@@ -1990,7 +1990,8 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # Enabling/Changing
                 if current_db_pwd:
-                    await client.change_cloud_password(current_password=current_db_pwd, new_password=target_password, hint=target_hint)
+                    # --- FIX: Changed hint=target_hint to new_hint=target_hint ---
+                    await client.change_cloud_password(current_password=current_db_pwd, new_password=target_password, new_hint=target_hint)
                     results.append(f"✅ {account_name}: 2FA Changed.")
                 else:
                     # Try enabling
