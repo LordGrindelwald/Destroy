@@ -50,8 +50,7 @@ ACCOUNTS_PER_PAGE = 16 # 8 rows * 2 columns
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_html(
-        "👋 Welcome! I am your personal account manager.\n\n"
-        "Use /settings to configure, /add to add, and /remove to delete accounts."
+        "Personal Account Manager."
     )
 
 @owner_only
