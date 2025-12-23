@@ -1921,8 +1921,6 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
       - ConversationHandler.END if finished.
       - AWAIT_CURRENT_2FA_PASSWORD if an interruption occurs.
     """
-    pending_ids = context.user_data.get('pending_2fa_ids', [])
-    current_retry_id = context.user_data.get('current_2fa_user_id')
     results = context.user_data.get('2fa_results', [])
     
     delay = context.user_data.get('2fa_delay', 5)
@@ -1934,7 +1932,13 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_hint = hint_input if hint_input != "#empty#" else None
 
     # Loop until we run out of accounts OR we hit an interruption
-    while pending_ids or current_retry_id:
+    # --- FIX: Refactored loop to correctly manage retry IDs ---
+    while True:
+        pending_ids = context.user_data.get('pending_2fa_ids', [])
+        current_retry_id = context.user_data.get('current_2fa_user_id')
+        
+        if not pending_ids and not current_retry_id:
+            break
         
         # Determine which user to process
         if current_retry_id:
