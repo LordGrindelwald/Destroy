@@ -25,7 +25,7 @@ from config import (
     AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL,
     AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE,
     # --- NEW STATES ---
-    AWAIT_BUTTON_2FA, SELECT_ACCOUNTS_2FA, AWAIT_DELAY_2FA, AWAIT_PASSWORD_2FA, AWAIT_HINT_2FA
+    AWAIT_BUTTON_2FA, SELECT_ACCOUNTS_2FA, AWAIT_DELAY_2FA, AWAIT_PASSWORD_2FA, AWAIT_HINT_2FA, AWAIT_CURRENT_2FA_PASSWORD
 )
 # --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
@@ -1893,41 +1893,70 @@ async def handle_2fa_password_input(update: Update, context: ContextTypes.DEFAUL
     )
     return AWAIT_HINT_2FA
 
+# --- REBUILT LOGIC FOR SEQUENTIAL 2FA PROCESSING ---
+
 @owner_only
 async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the hint input and executes the bulk update."""
+    """Handles the hint input and initiates the processing queue."""
     hint_input = update.message.text.strip()
     
-    password_input = context.user_data.get('new_2fa_password')
-    delay = context.user_data.get('2fa_delay', 5)
+    # Store settings
+    context.user_data['new_2fa_hint'] = hint_input
     selected_accounts = context.user_data.get('selected_accounts', set())
     
-    # Determine mode
-    disable_mode = (password_input == "#empty#")
-    new_password = password_input if not disable_mode else None
-    new_hint = hint_input if hint_input != "#empty#" else None
+    # Initialize Queue
+    context.user_data['pending_2fa_ids'] = list(selected_accounts)
+    context.user_data['2fa_results'] = []
+    context.user_data['current_2fa_user_id'] = None # Used for retries
     
-    progress_msg = await update.message.reply_text(f"🚀 Starting 2FA update for {len(selected_accounts)} accounts...")
+    await update.message.reply_text(f"🚀 Starting 2FA update for {len(selected_accounts)} accounts...")
     
-    results = []
+    # Start Processing
+    return await process_2fa_queue(update, context)
+
+async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Processes the queue of accounts for 2FA updates.
+    Returns:
+      - ConversationHandler.END if finished.
+      - AWAIT_CURRENT_2FA_PASSWORD if an interruption occurs.
+    """
+    pending_ids = context.user_data.get('pending_2fa_ids', [])
+    current_retry_id = context.user_data.get('current_2fa_user_id')
+    results = context.user_data.get('2fa_results', [])
     
-    for i, user_id in enumerate(selected_accounts):
-        if i > 0 and delay > 0:
-            await asyncio.sleep(delay)
-            
+    delay = context.user_data.get('2fa_delay', 5)
+    new_password = context.user_data.get('new_2fa_password')
+    hint_input = context.user_data.get('new_2fa_hint')
+    
+    disable_mode = (new_password == "#empty#")
+    target_password = new_password if not disable_mode else None
+    target_hint = hint_input if hint_input != "#empty#" else None
+
+    # Loop until we run out of accounts OR we hit an interruption
+    while pending_ids or current_retry_id:
+        
+        # Determine which user to process
+        if current_retry_id:
+            user_id = current_retry_id
+        else:
+            user_id = pending_ids.pop(0)
+            # Add delay only if it's a new account from the queue (not the first one)
+            if len(results) > 0 and delay > 0:
+                await asyncio.sleep(delay)
+
         account_name = f"ID: {user_id}"
         
-        # Check if bot is active
         if user_id not in active_userbots:
             results.append(f"❌ {account_name}: Bot is OFFLINE.")
+            context.user_data['current_2fa_user_id'] = None # Reset retry
             continue
-            
+
         client = active_userbots[user_id]
         if client.me:
-            account_name = escape_html(client.me.first_name)
-        
-        # --- NEW LOGIC START ---
-        # Fetch current stored password from DB
+             account_name = escape_html(client.me.first_name)
+
+        # Get stored password
         try:
             account_doc = await asyncio.to_thread(
                 accounts_collection.find_one,
@@ -1935,69 +1964,123 @@ async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception:
             account_doc = None
-            
         current_db_pwd = account_doc.get("two_fa_password") if account_doc else None
-            
+        
         try:
             if disable_mode:
-                # Disabling 2FA
-                # We need the current password to disable it
                 if current_db_pwd:
                     await client.disable_cloud_password(password=current_db_pwd)
                     results.append(f"✅ {account_name}: 2FA Disabled.")
                 else:
-                    # If we don't have it, try without (unlikely to work if enabled, but valid attempt)
-                    # Note: Pyrogram `disable_cloud_password` usually requires a password if one is set.
-                    # We can try catching the specific error.
+                    # Try without password
                     try:
                         await client.disable_cloud_password() 
                         results.append(f"✅ {account_name}: 2FA Disabled (No pwd required).")
                     except (PasswordHashInvalid, BadRequest):
-                        results.append(f"⚠️ {account_name}: Failed. 2FA is on but I don't have the stored password. Use /update2fa.")
-                        continue
+                        # INTERRUPTION NEEDED
+                        context.user_data['current_2fa_user_id'] = user_id # Set for retry
+                        await update.message.reply_html(
+                            f"🔐 <b>Current 2FA Password Required</b>\n\n"
+                            f"I cannot disable 2FA for account <b>{account_name}</b> because the stored password is missing or incorrect.\n\n"
+                            f"Please send the <b>CURRENT</b> 2FA password for this account to continue.\n"
+                            f"<i>(Send /skip to skip this account)</i>"
+                        )
+                        return AWAIT_CURRENT_2FA_PASSWORD # Pause execution here
 
             else:
-                # Enabling/Changing 2FA
+                # Enabling/Changing
                 if current_db_pwd:
-                    # If we have a stored password, we assume we need to CHANGE it
-                    await client.change_cloud_password(current_password=current_db_pwd, new_password=new_password, hint=new_hint)
+                    await client.change_cloud_password(current_password=current_db_pwd, new_password=target_password, hint=target_hint)
                     results.append(f"✅ {account_name}: 2FA Changed.")
                 else:
-                    # If no stored password, try ENABLING it (assuming none exists)
-                    # If one DOES exist, this will fail with an error, which we catch
+                    # Try enabling
                     try:
-                        await client.enable_cloud_password(password=new_password, hint=new_hint)
+                        await client.enable_cloud_password(password=target_password, hint=target_hint)
                         results.append(f"✅ {account_name}: 2FA Enabled.")
                     except (BadRequest, Exception) as inner_e:
-                        # "Password already enabled" type errors
                         if "PASSWORD_ALREADY_ENABLED" in str(inner_e) or "cloud password" in str(inner_e).lower():
-                             results.append(f"⚠️ {account_name}: 2FA is already on, but I don't have the stored password to change it. Use /update2fa.")
+                             # INTERRUPTION NEEDED
+                             context.user_data['current_2fa_user_id'] = user_id # Set for retry
+                             await update.message.reply_html(
+                                f"🔐 <b>Current 2FA Password Required</b>\n\n"
+                                f"2FA is already enabled for <b>{account_name}</b>, but I don't have the stored password to change it.\n\n"
+                                f"Please send the <b>CURRENT</b> 2FA password for this account to continue.\n"
+                                f"<i>(Send /skip to skip this account)</i>"
+                             )
+                             return AWAIT_CURRENT_2FA_PASSWORD # Pause execution here
                         else:
-                             raise inner_e # Re-raise to outer except block
+                             raise inner_e
 
-            # If success (didn't continue/raise), update DB with new password
-            # If disabled, set to None/Empty
-            final_stored_pwd = new_password if not disable_mode else None
+            # If success, update stored password
+            final_stored_pwd = target_password if not disable_mode else None
             await asyncio.to_thread(
                 accounts_collection.update_one,
                 {"user_id": user_id},
                 {"$set": {"two_fa_password": final_stored_pwd}}
             )
+            # Clear retry ID since success
+            context.user_data['current_2fa_user_id'] = None
 
         except PasswordHashInvalid:
-            results.append(f"⚠️ {account_name}: Stored 2FA password incorrect. Use /update2fa.")
+             # INTERRUPTION NEEDED (Wrong Password)
+             context.user_data['current_2fa_user_id'] = user_id
+             await update.message.reply_html(
+                f"🔐 <b>Incorrect 2FA Password</b>\n\n"
+                f"The stored password for <b>{account_name}</b> was incorrect.\n\n"
+                f"Please send the <b>CORRECT CURRENT</b> 2FA password to continue.\n"
+                f"<i>(Send /skip to skip this account)</i>"
+             )
+             return AWAIT_CURRENT_2FA_PASSWORD
+             
         except Exception as e:
             results.append(f"⚠️ {account_name}: {e}")
-        # --- NEW LOGIC END ---
-            
-    # Report results
+            context.user_data['current_2fa_user_id'] = None
+
+    # Loop Finished
     final_text = "<b>2FA Batch Update Complete</b>\n\n" + "\n".join(results)
     if len(final_text) > 4000:
         final_text = final_text[:4000] + "\n... (truncated)"
         
-    await progress_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
+    await update.message.reply_html(final_text)
     context.user_data.clear()
     return ConversationHandler.END
+
+@owner_only
+async def handle_current_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Receives the missing 2FA password, updates DB, and resumes the queue.
+    """
+    password = update.message.text.strip()
+    user_id = context.user_data.get('current_2fa_user_id')
+    
+    if not user_id:
+        await update.message.reply_text("Error: Lost track of the account ID. Aborting.")
+        return ConversationHandler.END
+        
+    # Update DB with the provided password
+    await asyncio.to_thread(
+        accounts_collection.update_one,
+        {"user_id": user_id},
+        {"$set": {"two_fa_password": password}}
+    )
+    
+    await update.message.reply_text("✅ Password saved. Retrying...")
+    
+    # Resume Queue (The user_id is still set in current_2fa_user_id, so it will retry)
+    return await process_2fa_queue(update, context)
+
+@owner_only
+async def skip_current_2fa_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skipts the current account in the 2FA queue."""
+    user_id = context.user_data.get('current_2fa_user_id')
+    results = context.user_data.get('2fa_results', [])
+    
+    if user_id:
+        results.append(f"⏩ ID {user_id}: Skipped by user.")
+        context.user_data['current_2fa_user_id'] = None # Clear so loop moves to next
+    
+    await update.message.reply_text("⏩ Account skipped.")
+    return await process_2fa_queue(update, context)
 
 @owner_only
 async def cancel_2fa_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2020,6 +2103,11 @@ two_fa_conv = ConversationHandler(
         AWAIT_DELAY_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_delay_input)],
         AWAIT_PASSWORD_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_password_input)],
         AWAIT_HINT_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_hint_input)],
+        # --- NEW STATE ---
+        AWAIT_CURRENT_2FA_PASSWORD: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_current_2fa_password_input),
+            CommandHandler("skip", skip_current_2fa_account)
+        ]
     },
     fallbacks=[
         CommandHandler("cancel", cancel_2fa_conv),
