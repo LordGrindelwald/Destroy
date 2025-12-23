@@ -129,6 +129,11 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Signed in! Generating session and adding account...")
         session_string = await client.export_session_string()
         
+        # --- FIX: Disconnect temp client BEFORE starting the new one to avoid AuthKey conflict ---
+        if client.is_connected: 
+            await client.disconnect()
+        # ---------------------------------------------------------------------------------------
+        
         persistent_device_model = context.user_data.get('persistent_device_model')
 
         status, user_info, detail = await start_userbot(
@@ -146,7 +151,6 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
         
         await update.message.delete()
-        if client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -176,6 +180,11 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ Password correct! Generating session and adding account...")
         session_string = await client.export_session_string()
         
+        # --- FIX: Disconnect temp client BEFORE starting the new one to avoid AuthKey conflict ---
+        if client and client.is_connected: 
+            await client.disconnect()
+        # ---------------------------------------------------------------------------------------
+        
         persistent_device_model = context.user_data.get('persistent_device_model')
 
         status, user_info, detail = await start_userbot(
@@ -204,7 +213,6 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
 
         await update.message.delete()
-        if client and client.is_connected: await client.disconnect()
         context.user_data.clear()
         return ConversationHandler.END
 
