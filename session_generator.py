@@ -188,7 +188,18 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if status == "success":
-            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!", parse_mode=ParseMode.HTML)
+            # --- NEW: Save 2FA Password to DB ---
+            if accounts_collection is not None:
+                try:
+                    accounts_collection.update_one(
+                        {"user_id": user_info.id},
+                        {"$set": {"two_fa_password": password}}
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save 2FA password for {user_info.id}: {e}")
+            # ------------------------------------
+            
+            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!\n🔐 <i>2FA Password saved.</i>", parse_mode=ParseMode.HTML)
         else:
             await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
 

@@ -28,7 +28,7 @@ from bot_handlers import (
     paste_single_conv, accounts_command, restart_command,
     online_interval_conv, remove_conv, # <-- NEW: Import remove_conv
     account_detail_command, toggle_otp_destroy_command, # <-- NEW: Import new commands
-    two_fa_conv # <-- NEW: Import 2FA conv
+    two_fa_conv, update_2fa_password_command # <-- NEW: Import 2FA conv and update cmd
 )
 
 # --- New dummy function for silent command ---
@@ -92,6 +92,7 @@ def main() -> None:
     application.add_handler(CommandHandler("accs", accounts_command)) # <-- NEW: Handles /accs and /accs -de
     application.add_handler(CommandHandler("acc", account_detail_command)) # <-- NEW: Handles /acc <name>
     application.add_handler(CommandHandler("toggle_otp_destroy", toggle_otp_destroy_command)) # <-- NEW
+    application.add_handler(CommandHandler("update2fa", update_2fa_password_command)) # <-- NEW
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("deduplicate_db", deduplicate_db_command))

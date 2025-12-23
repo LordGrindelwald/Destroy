@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
+from pyrogram.errors import PasswordHashInvalid, CloudPasswordNeeded, BadRequest
 
 # Import from our own modules
 from config import (
@@ -1031,6 +1032,10 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
     # OTP Destroying (Temporary Pause)
     if otp_destroy_enabled and user_id in paused_forwarding:
         otp_destroy_status = "⏸️ paused (temporarily)"
+    
+    # --- NEW: Show 2FA Status ---
+    two_fa_pwd = account.get("two_fa_password")
+    two_fa_status = "🔐 Stored" if two_fa_pwd else "⚠️ Not stored (Manual entry required for auto-updates)"
 
     text_parts = [
         f"<b>Account Settings for ID:</b> [<code>{unique_name}</code>]\n",
@@ -1046,6 +1051,8 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
         "------------",
         "--- OTP destroying ---",
         f"{otp_destroy_status}",
+        "------------",
+        f"<b>2FA Password:</b> {two_fa_status}",
     ]
     
     if otp_destroy_enabled:
@@ -1647,6 +1654,45 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
 
+# --- NEW: Manual 2FA Update Command ---
+
+@owner_only
+async def update_2fa_password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Updates the stored 2FA password in the database manually.
+    Usage: /update2fa <name_or_id> <password>
+    """
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection is not available.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /update2fa <user_id_or_name> <new_password>")
+        return
+    
+    identifier = context.args[0]
+    new_password = context.args[1] # Take only the second argument as password
+    
+    # We might want to support spaces in passwords later, but for now strict
+    # if len(context.args) > 2: ... (logic for spaced passwords)
+    
+    account = await get_account_from_arg(identifier)
+    
+    if not account:
+        await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
+        return
+        
+    await asyncio.to_thread(
+        accounts_collection.update_one,
+        {"_id": account["_id"]},
+        {"$set": {"two_fa_password": new_password}}
+    )
+    
+    await update.message.reply_html(
+        f"✅ Updated stored 2FA password for <b>{escape_html(account.get('first_name'))}</b> (<code>{account.get('user_id')}</code>)."
+    )
+
+
 # --- NEW: 2FA Configuration Conversation ---
 
 @owner_only
@@ -1878,16 +1924,70 @@ async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TY
         client = active_userbots[user_id]
         if client.me:
             account_name = escape_html(client.me.first_name)
+        
+        # --- NEW LOGIC START ---
+        # Fetch current stored password from DB
+        try:
+            account_doc = await asyncio.to_thread(
+                accounts_collection.find_one,
+                {"user_id": user_id}
+            )
+        except Exception:
+            account_doc = None
+            
+        current_db_pwd = account_doc.get("two_fa_password") if account_doc else None
             
         try:
             if disable_mode:
-                await client.disable_cloud_password()
-                results.append(f"✅ {account_name}: 2FA Disabled.")
+                # Disabling 2FA
+                # We need the current password to disable it
+                if current_db_pwd:
+                    await client.disable_cloud_password(password=current_db_pwd)
+                    results.append(f"✅ {account_name}: 2FA Disabled.")
+                else:
+                    # If we don't have it, try without (unlikely to work if enabled, but valid attempt)
+                    # Note: Pyrogram `disable_cloud_password` usually requires a password if one is set.
+                    # We can try catching the specific error.
+                    try:
+                        await client.disable_cloud_password() 
+                        results.append(f"✅ {account_name}: 2FA Disabled (No pwd required).")
+                    except (PasswordHashInvalid, BadRequest, CloudPasswordNeeded):
+                        results.append(f"⚠️ {account_name}: Failed. 2FA is on but I don't have the stored password. Use /update2fa.")
+                        continue
+
             else:
-                await client.enable_cloud_password(password=new_password, hint=new_hint)
-                results.append(f"✅ {account_name}: 2FA Updated.")
+                # Enabling/Changing 2FA
+                if current_db_pwd:
+                    # If we have a stored password, we assume we need to CHANGE it
+                    await client.change_cloud_password(current_password=current_db_pwd, new_password=new_password, hint=new_hint)
+                    results.append(f"✅ {account_name}: 2FA Changed.")
+                else:
+                    # If no stored password, try ENABLING it (assuming none exists)
+                    # If one DOES exist, this will fail with an error, which we catch
+                    try:
+                        await client.enable_cloud_password(password=new_password, hint=new_hint)
+                        results.append(f"✅ {account_name}: 2FA Enabled.")
+                    except (BadRequest, Exception) as inner_e:
+                        # "Password already enabled" type errors
+                        if "PASSWORD_ALREADY_ENABLED" in str(inner_e) or "cloud password" in str(inner_e).lower():
+                             results.append(f"⚠️ {account_name}: 2FA is already on, but I don't have the stored password to change it. Use /update2fa.")
+                        else:
+                             raise inner_e # Re-raise to outer except block
+
+            # If success (didn't continue/raise), update DB with new password
+            # If disabled, set to None/Empty
+            final_stored_pwd = new_password if not disable_mode else None
+            await asyncio.to_thread(
+                accounts_collection.update_one,
+                {"user_id": user_id},
+                {"$set": {"two_fa_password": final_stored_pwd}}
+            )
+
+        except PasswordHashInvalid:
+            results.append(f"⚠️ {account_name}: Stored 2FA password incorrect. Use /update2fa.")
         except Exception as e:
             results.append(f"⚠️ {account_name}: {e}")
+        # --- NEW LOGIC END ---
             
     # Report results
     final_text = "<b>2FA Batch Update Complete</b>\n\n" + "\n".join(results)
