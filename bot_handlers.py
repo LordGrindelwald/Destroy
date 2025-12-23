@@ -21,7 +21,9 @@ from config import (
     paused_forwarding, paused_notifications, logger,
     UNIQUE_NAME_PASTE, AWAIT_STRING_PASTE,
     AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL,
-    AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE # <-- NEW STATES
+    AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE,
+    # --- NEW STATES ---
+    AWAIT_BUTTON_2FA, SELECT_ACCOUNTS_2FA, AWAIT_DELAY_2FA, AWAIT_PASSWORD_2FA, AWAIT_HINT_2FA
 )
 # --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
@@ -1644,3 +1646,284 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
+
+# --- NEW: 2FA Configuration Conversation ---
+
+@owner_only
+async def two_fa_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for /2fas command."""
+    keyboard = [[InlineKeyboardButton("Select Accounts for 2FA 🔐", callback_data="2fa_start_selection")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_html(
+        "<b>2FA Configuration Manager</b>\n\n"
+        "Click the button below to select accounts for updating their Two-Step Verification password.",
+        reply_markup=reply_markup
+    )
+    return AWAIT_BUTTON_2FA
+
+@owner_only
+async def two_fa_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initializes the selection menu."""
+    query = update.callback_query
+    await query.answer()
+    
+    if accounts_collection is None:
+        await query.edit_message_text("⚠️ Database connection is not available.")
+        return ConversationHandler.END
+
+    # Get all accounts from DB
+    all_accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find({}, {"user_id": 1}))
+    )
+    if not all_accounts:
+        await query.edit_message_text("No accounts found.")
+        return ConversationHandler.END
+        
+    all_account_ids = [acc['user_id'] for acc in all_accounts]
+    
+    context.user_data.clear()
+    context.user_data['all_account_ids'] = all_account_ids
+    context.user_data['selected_accounts'] = set()
+    context.user_data['current_page'] = 0
+    
+    await draw_account_selection_menu_2fa(query, context)
+    return SELECT_ACCOUNTS_2FA
+
+async def draw_account_selection_menu_2fa(query, context: ContextTypes.DEFAULT_TYPE):
+    """Draws the account selection menu (reusing style from other menus)."""
+    all_account_ids = context.user_data.get('all_account_ids', [])
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    current_page = context.user_data.get('current_page', 0)
+    
+    total_accounts = len(all_account_ids)
+    total_pages = math.ceil(total_accounts / ACCOUNTS_PER_PAGE)
+    
+    start_index = current_page * ACCOUNTS_PER_PAGE
+    end_index = start_index + ACCOUNTS_PER_PAGE
+    page_account_ids = all_account_ids[start_index:end_index]
+    
+    page_accounts = []
+    if accounts_collection is not None:
+        page_accounts = await asyncio.to_thread(
+            lambda: list(accounts_collection.find(
+                {"user_id": {"$in": page_account_ids}},
+                {"first_name": 1, "user_id": 1, "unique_name": 1}
+            ))
+        )
+    
+    account_map = {acc['user_id']: acc for acc in page_accounts}
+    sorted_page_accounts = [account_map[uid] for uid in page_account_ids if uid in account_map]
+
+    keyboard = []
+    
+    # Control Row 1
+    keyboard.append([
+        InlineKeyboardButton(f"Select all ({total_accounts}) 🗂️", callback_data="2fa_select_all"),
+        InlineKeyboardButton(f"Unselect all ({len(selected_accounts)}) 🗑️", callback_data="2fa_unselect_all"),
+    ])
+    
+    # Account Buttons
+    account_buttons = []
+    for acc in sorted_page_accounts:
+        user_id = acc['user_id']
+        name = escape_html(acc.get('unique_name') or acc.get('first_name') or str(user_id))
+        is_selected = user_id in selected_accounts
+        prefix = "✅" if is_selected else "🔐"
+        
+        # Mark if active or not (optional visual cue)
+        if user_id not in active_userbots:
+            name += " (Offline)"
+            
+        account_buttons.append(InlineKeyboardButton(f"{prefix} {name}", callback_data=f"2fa_toggle_{user_id}"))
+
+    for i in range(0, len(account_buttons), 2):
+        keyboard.append(account_buttons[i:i+2])
+
+    # Done Button
+    keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="2fa_done_select")])
+
+    # Navigation
+    page_buttons = []
+    if current_page > 0:
+        page_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data="2fa_prev_page"))
+    page_buttons.append(InlineKeyboardButton(f"Page {current_page + 1}/{total_pages}", callback_data="2fa_noop"))
+    if current_page < total_pages - 1:
+        page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="2fa_next_page"))
+    keyboard.append(page_buttons)
+    
+    keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_2fa_conv")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message_text = f"<b>Select Accounts for 2FA</b>\nSelected: {len(selected_accounts)} / {total_accounts}"
+    
+    try:
+        await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except Exception:
+        pass
+
+@owner_only
+async def handle_account_selection_callback_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles button clicks on the 2FA selection menu."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    all_account_ids = context.user_data.get('all_account_ids', [])
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    current_page = context.user_data.get('current_page', 0)
+
+    if data == "2fa_done_select":
+        if not selected_accounts:
+            await query.answer("Please select at least one account.", show_alert=True)
+            return SELECT_ACCOUNTS_2FA
+            
+        # Check if more than one account is selected
+        if len(selected_accounts) > 1:
+            await query.edit_message_text(
+                "⏱️ <b>Delay Configuration</b>\n\n"
+                "Please send the delay (in seconds) between changing 2FA for each account.\n"
+                "Default is <b>5</b> seconds.",
+                parse_mode=ParseMode.HTML
+            )
+            return AWAIT_DELAY_2FA
+        else:
+            # Skip delay for single account
+            context.user_data['2fa_delay'] = 0
+            await ask_for_2fa_password(query, context)
+            return AWAIT_PASSWORD_2FA
+
+    # Toggle Logic
+    elif data.startswith("2fa_toggle_"):
+        user_id = int(data.split("_")[2])
+        if user_id in selected_accounts: selected_accounts.discard(user_id)
+        else: selected_accounts.add(user_id)
+    elif data == "2fa_select_all": selected_accounts.update(all_account_ids)
+    elif data == "2fa_unselect_all": selected_accounts.clear()
+    
+    # Pagination Logic
+    elif data == "2fa_next_page": context.user_data['current_page'] += 1
+    elif data == "2fa_prev_page": context.user_data['current_page'] -= 1
+    
+    context.user_data['selected_accounts'] = selected_accounts
+    await draw_account_selection_menu_2fa(query, context)
+    return SELECT_ACCOUNTS_2FA
+
+async def ask_for_2fa_password(messageable, context):
+    """Helper to send the password prompt."""
+    text = (
+        "💭🔐 <b>Send the new 2FA password</b> for your selected accounts\n\n"
+        "ℹ️ You can reply with <code>#empty#</code> to disable 2FA password."
+    )
+    if isinstance(messageable, Update):
+        await messageable.message.reply_html(text)
+    else: # It's a callback query or message object
+        if hasattr(messageable, 'edit_message_text'):
+            await messageable.edit_message_text(text, parse_mode=ParseMode.HTML)
+        else:
+            await messageable.reply_html(text)
+
+@owner_only
+async def handle_2fa_delay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the delay input."""
+    text = update.message.text.strip()
+    delay = 5
+    if text.isdigit():
+        delay = int(text)
+    
+    context.user_data['2fa_delay'] = delay
+    await ask_for_2fa_password(update, context)
+    return AWAIT_PASSWORD_2FA
+
+@owner_only
+async def handle_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the password input."""
+    password_input = update.message.text.strip()
+    context.user_data['new_2fa_password'] = password_input
+    
+    await update.message.reply_html(
+        "💭 <b>Send the new 2FA HINT</b> 💡 for your selected accounts\n\n"
+        "ℹ️ You can reply with <code>#empty#</code> to set no 2FA HINT."
+    )
+    return AWAIT_HINT_2FA
+
+@owner_only
+async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the hint input and executes the bulk update."""
+    hint_input = update.message.text.strip()
+    
+    password_input = context.user_data.get('new_2fa_password')
+    delay = context.user_data.get('2fa_delay', 5)
+    selected_accounts = context.user_data.get('selected_accounts', set())
+    
+    # Determine mode
+    disable_mode = (password_input == "#empty#")
+    new_password = password_input if not disable_mode else None
+    new_hint = hint_input if hint_input != "#empty#" else None
+    
+    progress_msg = await update.message.reply_text(f"🚀 Starting 2FA update for {len(selected_accounts)} accounts...")
+    
+    results = []
+    
+    for i, user_id in enumerate(selected_accounts):
+        if i > 0 and delay > 0:
+            await asyncio.sleep(delay)
+            
+        account_name = f"ID: {user_id}"
+        
+        # Check if bot is active
+        if user_id not in active_userbots:
+            results.append(f"❌ {account_name}: Bot is OFFLINE.")
+            continue
+            
+        client = active_userbots[user_id]
+        if client.me:
+            account_name = escape_html(client.me.first_name)
+            
+        try:
+            if disable_mode:
+                await client.disable_cloud_password()
+                results.append(f"✅ {account_name}: 2FA Disabled.")
+            else:
+                await client.enable_cloud_password(password=new_password, hint=new_hint)
+                results.append(f"✅ {account_name}: 2FA Updated.")
+        except Exception as e:
+            results.append(f"⚠️ {account_name}: {e}")
+            
+    # Report results
+    final_text = "<b>2FA Batch Update Complete</b>\n\n" + "\n".join(results)
+    if len(final_text) > 4000:
+        final_text = final_text[:4000] + "\n... (truncated)"
+        
+    await progress_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+@owner_only
+async def cancel_2fa_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the 2FA conversation."""
+    context.user_data.clear()
+    msg = "✖️ 2FA configuration cancelled."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(msg)
+    else:
+        await update.message.reply_text(msg)
+    return ConversationHandler.END
+
+# --- 2FA Conversation Handler Definition ---
+two_fa_conv = ConversationHandler(
+    entry_points=[CommandHandler("2fas", two_fa_start)],
+    states={
+        AWAIT_BUTTON_2FA: [CallbackQueryHandler(two_fa_menu, pattern="^2fa_start_selection$")],
+        SELECT_ACCOUNTS_2FA: [CallbackQueryHandler(handle_account_selection_callback_2fa, pattern="^2fa_")],
+        AWAIT_DELAY_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_delay_input)],
+        AWAIT_PASSWORD_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_password_input)],
+        AWAIT_HINT_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_hint_input)],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel_2fa_conv),
+        CallbackQueryHandler(cancel_2fa_conv, pattern="^cancel_2fa_conv$"),
+        *COMMAND_FALLBACKS
+    ],
+    conversation_timeout=600
+)

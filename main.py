@@ -27,7 +27,8 @@ from bot_handlers import (
     pause_notifications_callback, handle_text_input,
     paste_single_conv, accounts_command, restart_command,
     online_interval_conv, remove_conv, # <-- NEW: Import remove_conv
-    account_detail_command, toggle_otp_destroy_command # <-- NEW: Import new commands
+    account_detail_command, toggle_otp_destroy_command, # <-- NEW: Import new commands
+    two_fa_conv # <-- NEW: Import 2FA conv
 )
 
 # --- New dummy function for silent command ---
@@ -75,6 +76,7 @@ def main() -> None:
     application.add_handler(paste_single_conv, group=0)
     application.add_handler(online_interval_conv, group=0)
     application.add_handler(remove_conv, group=0) # <-- NEW: Handles /remove
+    application.add_handler(two_fa_conv, group=0) # <-- NEW: Handles /2fas
 
     # 2. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
