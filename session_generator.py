@@ -39,15 +39,13 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_callback and context.args and context.args[0] == '-sess':
         context.user_data.clear()
         keyboard = [
-            [InlineKeyboardButton("📝 Paste Single String", callback_data="add_single")],
-            [InlineKeyboardButton("📋 Paste Multiple Strings", callback_data="add_multiple")],
+            [InlineKeyboardButton("Single String", callback_data="add_single")],
+            [InlineKeyboardButton("Multiple Strings", callback_data="add_multiple")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         message_text = (
-            "➕  <b>Add a New Account (Session)</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Please choose a method to add a new userbot account via session string."
+            "➕  <b>Add Account via Session</b>"
         )
         await message.reply_html(message_text, reply_markup=reply_markup)
         return ConversationHandler.END
@@ -73,7 +71,7 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     context.user_data['unique_name'] = unique_name
     context.user_data['persistent_device_model'] = persistent_device_model
     
-    await update.message.reply_text(f"Name set to: <b>{unique_name}</b>\nGreat. Now please send the phone number in international format (e.g., +1234567890).", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
     return PHONE
 
 @owner_only
@@ -108,7 +106,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sent_code = await client.send_code(phone)
         context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
-        await msg.edit_text("A login code has been sent to your Telegram account. Please send it here.")
+        await msg.edit_text("Send login code")
         return CODE
     except Exception as e:
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
@@ -126,7 +124,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.sign_in(phone, phone_code_hash, code)
         
-        await msg.edit_text("✅ Signed in! Generating session and adding account...")
+        await msg.edit_text("✅ Signed in! Adding account...")
         session_string = await client.export_session_string()
         
         # --- FIX: Disconnect temp client BEFORE starting the new one to avoid AuthKey conflict ---
@@ -146,9 +144,9 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if status == "success":
-            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!", parse_mode=ParseMode.HTML)
+            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added!", parse_mode=ParseMode.HTML)
         else:
-            await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
+            await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string:\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
         
         await update.message.delete()
         context.user_data.clear()
@@ -160,7 +158,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['password_attempts'] = 0
         
         hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
-        await msg.edit_text(f"🔐 2FA is enabled{hint_text}.\nPlease send your password.")
+        await msg.edit_text(f"🔐 2FA is enabled{hint_text}.\nSend password.")
         return PASSWORD
     except Exception as e:
         await msg.edit_text(f"❌ <b>Error:</b> <code>{escape_html(str(e))}</code>. Cancelled.", parse_mode=ParseMode.HTML)
@@ -177,7 +175,7 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.check_password(password)
 
-        await msg.edit_text("✅ Password correct! Generating session and adding account...")
+        await msg.edit_text("✅ Password correct! Adding account...")
         session_string = await client.export_session_string()
         
         # --- FIX: Disconnect temp client BEFORE starting the new one to avoid AuthKey conflict ---
@@ -208,9 +206,9 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Failed to save 2FA password for {user_info.id}: {e}")
             # ------------------------------------
             
-            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!\n🔐 <i>2FA Password saved.</i>", parse_mode=ParseMode.HTML)
+            await msg.edit_text(f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added!", parse_mode=ParseMode.HTML)
         else:
-            await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string (for manual retry):\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
+            await msg.edit_text(f"⚠️ Error adding account: {detail}\n\nSession string:\n<code>{session_string}</code>", parse_mode=ParseMode.HTML)
 
         await update.message.delete()
         context.user_data.clear()
@@ -222,10 +220,10 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['password_attempts'] = attempts
         
         if attempts < 3:
-            await msg.edit_text(f"❌ Incorrect password (Attempt {attempts}/3).\nPlease try again.")
+            await msg.edit_text(f"❌ Incorrect password (Attempt {attempts}/3).\nTry again.")
             return PASSWORD
         else:
-            await msg.edit_text("❌ Incorrect password. Too many attempts (3/3). Cancelled.")
+            await msg.edit_text("❌ Incorrect password. Attempts (3/3). Cancelled.")
             if client and client.is_connected: await client.disconnect()
             context.user_data.clear()
             return ConversationHandler.END
