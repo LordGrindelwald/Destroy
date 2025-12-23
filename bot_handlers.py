@@ -1948,7 +1948,7 @@ async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TY
                     # If we don't have it, try without (unlikely to work if enabled, but valid attempt)
                     # Note: Pyrogram `disable_cloud_password` usually requires a password if one is set.
                     # We can try catching the specific error.
-                    except (PasswordHashInvalid, BadRequest):
+                    except (PasswordHashInvalid, BadRequest)
 
             else:
                 # Enabling/Changing 2FA
