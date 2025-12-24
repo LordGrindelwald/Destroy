@@ -1,6 +1,7 @@
 import asyncio
 import io
 import time
+import base64
 import qrcode
 from pyrogram import Client
 from pyrogram.errors import (
@@ -35,13 +36,7 @@ from userbot_logic import start_userbot
 
 @owner_only
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Entry point for session generation.
-    Supports:
-    /add          -> Phone number flow
-    /add -sess    -> Session string paste
-    /add -qr      -> QR Code login
-    """
+    """Entry point for session generation."""
     message = update.message or update.callback_query.message
     context.user_data.clear()
 
@@ -86,14 +81,15 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     
     # --- Check if QR Flow was requested ---
     if context.user_data.get('is_qr_flow'):
-        await update.message.reply_text(f"Name: <b>{unique_name}</b>\nPreparing QR Code... ⏳", parse_mode=ParseMode.HTML)
-        # Start the QR Loop
-        return await qr_login_handler(update, context)
+        # Send initial message that we will edit later
+        status_msg = await update.message.reply_text(f"Name: <b>{unique_name}</b>\nPreparing QR Code... ⏳", parse_mode=ParseMode.HTML)
+        # Pass this message to the handler so it can edit it
+        return await qr_login_handler(update, context, status_msg)
 
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
     return PHONE
 
-async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
     """Handles the QR Code Login Loop with refresh and timeout."""
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
@@ -114,8 +110,11 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data['temp_client'] = client
 
-    # We use this to track the message we keep editing
-    status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
+    # Use the passed message if available, otherwise send new
+    if not status_msg:
+        status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
+    else:
+        await status_msg.edit_text("⏳ Connecting to Telegram Network...")
 
     try:
         await client.connect()
@@ -124,9 +123,9 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     start_time = time.time()
-    total_timeout = 180 # 3 minutes total
+    total_timeout = 180 
     
-    qr_message_id = None
+    qr_message_id = status_msg.message_id
     chat_id = update.effective_chat.id
     
     try:
@@ -135,12 +134,9 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elapsed = time.time() - start_time
             if elapsed > total_timeout:
                 if qr_message_id:
-                    # Delete the photo message to be clean
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
+                    try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
                 
-                # Send text-only timeout message
                 await context.bot.send_message(chat_id=chat_id, text="❌ QR add timed out.")
                 
                 if client.is_connected: await client.disconnect()
@@ -164,7 +160,15 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 hint = await client.get_password_hint()
                 hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
-                await context.bot.send_message(chat_id=chat_id, text=f"🔐 <b>2FA Required</b>{hint_text}\n\nYou scanned the code successfully! Please enter your password.", parse_mode=ParseMode.HTML)
+                
+                # Send a new message for password (or we could store a new ID, but this is a state change)
+                pwd_msg = await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=f"🔐 <b>2FA Required</b>{hint_text}\n\nYou scanned the code successfully! Please enter your password.", 
+                    parse_mode=ParseMode.HTML
+                )
+                # Store this message ID to edit later if needed
+                context.user_data['pwd_msg_id'] = pwd_msg.message_id
                 return PASSWORD
 
             if isinstance(token_result, types.auth.LoginTokenSuccess):
@@ -173,12 +177,15 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
                 
-                await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Logging in...")
-                return await finalize_login(update, context, client)
+                success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Logging in...")
+                return await finalize_login(update, context, client, success_msg)
 
             elif isinstance(token_result, types.auth.LoginToken):
                 # 2. Generate QR Image
-                url = f"tg://login?token={token_result.token.decode('utf-8')}"
+                # FIX: Use base64 encoding for the binary token
+                safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
+                url = f"tg://login?token={safe_token}"
+                
                 qr = qrcode.QRCode(border=2)
                 qr.add_data(url)
                 qr.make(fit=True)
@@ -201,46 +208,27 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
                 # 4. Send or Edit Message
-                if status_msg:
-                    await status_msg.delete()
-                    status_msg = None # clear it so we don't delete again
-
-                if qr_message_id:
-                    try:
-                        # We use EditMessageMedia to refresh the image in place
-                        await context.bot.edit_message_media(
-                            chat_id=chat_id,
-                            message_id=qr_message_id,
-                            media=InputMediaPhoto(media=bio, caption=caption, parse_mode=ParseMode.HTML),
-                            reply_markup=reply_markup
-                        )
-                    except Exception as e:
-                        # If edit fails (sometimes media mismatch), delete and resend
-                        try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                        except: pass
-                        sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-                        qr_message_id = sent.message_id
-                else:
+                # We try to edit the media first. If it was text, we might need to delete and send photo.
+                try:
+                    await context.bot.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=qr_message_id,
+                        media=InputMediaPhoto(media=bio, caption=caption, parse_mode=ParseMode.HTML),
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    # If editing fails (e.g. changing text to photo not allowed by API in this context or mismatch)
+                    # We delete the old text message and send the photo
+                    try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
+                    except: pass
+                    
                     sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                     qr_message_id = sent.message_id
-
-                # 5. Wait loop
-                # The token expires in token_result.expires (unix timestamp)
-                # We sleep for ~5s and check for LoginTokenSuccess status implicitly by calling export again?
-                # Actually, Pyrogram needs us to catch the update. 
-                # HOWEVER, simpler way: wait 5 seconds, if loop repeats, we get same token?
-                # No, ExportLoginToken usually returns same token until it rotates.
-                # We will just sleep for 5 seconds and repeat the loop. 
-                # If token hasn't changed, we update the "Remaining time" text?
-                # To minimize spamming edits, we only update image if token changes.
                 
-                # Inner loop to poll for status change without regenerating image
-                # Token usually valid for 30s
+                # 5. Wait loop
                 wait_until = time.time() + 5
                 while time.time() < wait_until:
                     await asyncio.sleep(1) 
-                    # We can't easily check status without re-invoking. 
-                    # Re-invoking ExportLoginToken IS the check.
                 
                 continue
 
@@ -253,7 +241,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
 
     except AuthTokenExpired:
-        # Should be caught by the loop logic usually
         pass
     except Exception as e:
         logger.error(f"QR Error: {e}")
@@ -271,7 +258,6 @@ async def cancel_qr_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Delete the QR message
     try:
         await query.message.delete()
     except: pass
@@ -314,7 +300,6 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return ConversationHandler.END
     
-    # --- Loop to handle FloodWait automatically ---
     sent_code = None
     while True:
         try:
@@ -337,18 +322,18 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
     
-    # --- Simplified Delivery Text (No buttons) ---
+    # --- Updated Styling ---
     delivery_text = "Send login code"
     if sent_code.type:
         type_str = str(sent_code.type).upper()
         if "EMAIL" in type_str:
-            delivery_text = "✅ <b>Code sent to EMAIL</b> 📧\n<i>(Also check your Telegram App)</i>"
+            delivery_text = "☑️ Code sent to <b>EMAIL</b>"
         elif "APP" in type_str:
-            delivery_text = "✅ <b>Code sent to TELEGRAM APP</b> 📲"
+            delivery_text = "☑️ Code sent to <b>TG</b>"
         elif "SMS" in type_str:
-            delivery_text = "✅ <b>Code sent via SMS</b> 💬"
+            delivery_text = "☑️ Code sent via <b>SMS</b>"
         else:
-            delivery_text = f"✅ Code sent via <b>{escape_html(type_str)}</b>"
+            delivery_text = f"☑️ Code sent via <b>{escape_html(type_str)}</b>"
     
     delivery_text += "\n\n👇 Send the code below."
 
@@ -365,7 +350,7 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await client.sign_in(phone, phone_code_hash, code)
         await msg.edit_text("✅ Signed in! Adding account...")
-        return await finalize_login(update, context, client)
+        return await finalize_login(update, context, client, msg)
 
     except SessionPasswordNeeded:
         hint = await client.get_password_hint()
@@ -384,14 +369,26 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password, client = update.message.text, context.user_data['temp_client']
     
+    # Check if we have a saved message ID from QR flow or just reply
+    if 'pwd_msg_id' in context.user_data:
+        try:
+            # We can't edit the old message easily with text from user update, so we send a "Checking..." 
+            # OR we try to edit the specific message if we knew where it was.
+            # Simpler: just reply, but we pass this reply to finalize so it gets edited.
+            pass
+        except: pass
+
     msg = await update.message.reply_text("⏳ Checking password...")
+    
     try:
         await client.check_password(password)
+        # We edit here, then pass to finalize to edit AGAIN to "Success"
         await msg.edit_text("✅ Password correct! Adding account...")
         
         context.user_data['successful_2fa_pwd'] = password
         
-        return await finalize_login(update, context, client)
+        # Pass the 'msg' object so finalize_login can edit it instead of sending new
+        return await finalize_login(update, context, client, msg)
 
     except PasswordHashInvalid:
         attempts = context.user_data.get('password_attempts', 0) + 1
@@ -411,8 +408,11 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 
-async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, client: Client):
-    """Common function to export session, stop temp client, and start userbot."""
+async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, client: Client, status_message=None):
+    """
+    Common function to export session, stop temp client, and start userbot.
+    status_message: If provided, this message object is edited with the final result.
+    """
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
@@ -443,26 +443,24 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, cli
             )
         except Exception: pass
 
-    # 5. Reply
-    # If we are in QR flow, the original message might be gone or we are replying to a text message
-    text_method = update.callback_query.message if update.callback_query else update.message
-    # If update.message is None (because we came from a background task or deleted message), use context.bot
-    
-    # Safe reply
-    try:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!",
-            parse_mode=ParseMode.HTML
-        )
-    except: pass
-    
-    if status != "success":
+    # 5. Send Result (Edit if possible)
+    final_text = ""
+    if status == "success":
+        final_text = f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!"
+    else:
+        final_text = f"⚠️ Error adding account: {detail}"
+
+    if status_message:
         try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"⚠️ Error adding account: {detail}"
-            )
+            await status_message.edit_text(final_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            # Fallback if edit fails (e.g. message too old)
+            try: await context.bot.send_message(chat_id=update.effective_chat.id, text=final_text, parse_mode=ParseMode.HTML)
+            except: pass
+    else:
+        # No message to edit provided
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=final_text, parse_mode=ParseMode.HTML)
         except: pass
 
     context.user_data.clear()
