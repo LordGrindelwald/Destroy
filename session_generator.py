@@ -3,13 +3,12 @@ import io
 import time
 import base64
 import qrcode
-from pyrogram import Client
+from pyrogram import Client, types
 from pyrogram.errors import (
     SessionPasswordNeeded, PasswordHashInvalid, FloodWait, 
     PhoneNumberInvalid, PhoneNumberBanned, AuthTokenExpired,
     RPCError
 )
-from pyrogram.raw import functions, types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     CommandHandler,
@@ -83,11 +82,12 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
     return PHONE
 
-async def create_new_client(update, context, dc_id=None):
-    """Helper to create a fresh client, optionally forcing a specific DC."""
+async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
+    """Handles the QR Code Login using Client.sign_in_qrcode() from Pyroblack."""
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
+    # 1. Initialize Client
     client = Client(
         name=f"temp_gen_{update.effective_user.id}_{int(time.time())}", 
         in_memory=True, 
@@ -101,16 +101,6 @@ async def create_new_client(update, context, dc_id=None):
         system_lang_code=TD_SYSTEM_LANG_CODE,
         lang_pack=TD_LANG_PACK
     )
-    
-    if dc_id:
-        client.session.dc_id = dc_id
-        
-    return client
-
-async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
-    """Handles the QR Code Login Loop with Seamless Migration."""
-    
-    client = await create_new_client(update, context)
     context.user_data['temp_client'] = client
 
     if not status_msg:
@@ -119,17 +109,18 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         await status_msg.edit_text("⏳ Connecting...")
 
     try:
-        await asyncio.wait_for(client.connect(), timeout=10.0)
+        await client.connect()
     except Exception as e:
         await status_msg.edit_text(f"❌ Connection Failed: {e}")
         return ConversationHandler.END
 
+    # 2. QR Loop
     start_time = time.time()
     total_timeout = 180 
     
     qr_message_id = status_msg.message_id
     chat_id = update.effective_chat.id
-    last_token = None
+    last_qr_string = None
     
     while True:
         elapsed = time.time() - start_time
@@ -143,20 +134,12 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             return ConversationHandler.END
 
         try:
-            # Wrap Export in timeout to prevent hangs
-            token_result = await asyncio.wait_for(
-                client.invoke(
-                    functions.auth.ExportLoginToken(
-                        api_id=TD_API_ID,
-                        api_hash=TD_API_HASH,
-                        except_ids=[]
-                    )
-                ),
-                timeout=8.0
-            )
+            # --- USE PYROBLACK NATIVE METHOD ---
+            # This returns either a User (success) or a LoginToken (pending)
+            result = await client.sign_in_qrcode()
             
-            # --- SCENARIO 1: SUCCESS (Direct Login) ---
-            if isinstance(token_result, types.auth.LoginTokenSuccess):
+            # --- CASE 1: LOGGED IN (User Object) ---
+            if isinstance(result, types.User):
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
@@ -164,16 +147,21 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Verifying...")
                 return await finalize_login(update, context, client, success_msg)
 
-            # --- SCENARIO 2: DISPLAY QR CODE ---
-            elif isinstance(token_result, types.auth.LoginToken):
-                if last_token != token_result.token:
-                    last_token = token_result.token
-                    
-                    safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
-                    url = f"tg://login?token={safe_token}"
+            # --- CASE 2: PENDING (LoginToken) ---
+            elif isinstance(result, types.LoginToken):
+                # Extract URL (Pyroblack tokens usually have .url, otherwise construct it)
+                qr_url = getattr(result, 'url', None)
+                if not qr_url:
+                    # Fallback: Construct URL from token bytes
+                    safe_token = base64.urlsafe_b64encode(result.token).decode('utf-8').rstrip('=')
+                    qr_url = f"tg://login?token={safe_token}"
+
+                # Only update message if the code changed
+                if last_qr_string != qr_url:
+                    last_qr_string = qr_url
                     
                     qr = qrcode.QRCode(border=2)
-                    qr.add_data(url)
+                    qr.add_data(qr_url)
                     qr.make(fit=True)
                     img = qr.make_image(fill='black', back_color='white')
                     
@@ -205,83 +193,17 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                         qr_message_id = sent.message_id
                 
-                await asyncio.sleep(1.0)
-                continue
-
-            # --- SCENARIO 3: DC MIGRATION (Seamless) ---
-            elif isinstance(token_result, types.auth.LoginTokenMigrateTo):
-                target_dc = token_result.dc_id
-                migrated_token = token_result.token
-
-                # Seamless Feedback
-                try:
-                    await context.bot.edit_message_caption(
-                        chat_id=chat_id, 
-                        message_id=qr_message_id, 
-                        caption="🔄 <b>Verifying...</b>",
-                        parse_mode=ParseMode.HTML
-                    )
-                except: pass
-
-                # 1. Switch Client
-                await client.disconnect()
-                client = await create_new_client(update, context, dc_id=target_dc)
-                context.user_data['temp_client'] = client
-                
-                # Robust connection with timeout
-                try:
-                    await asyncio.wait_for(client.connect(), timeout=8.0)
-                except Exception:
-                     # If connect fails, we just loop; UI will naturally refresh to QR or Timeout
-                     await asyncio.sleep(1)
-                     continue
-
-                # 2. IMPORT THE TOKEN
-                try:
-                    import_result = await asyncio.wait_for(
-                        client.invoke(functions.auth.ImportLoginToken(token=migrated_token)),
-                        timeout=8.0
-                    )
-                    
-                    if isinstance(import_result, types.auth.LoginTokenSuccess):
-                        if qr_message_id:
-                            try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                            except: pass
-                        success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Login Successful! Finalizing...")
-                        return await finalize_login(update, context, client, success_msg)
-                    
-                    # If import didn't return Success, force a token refresh in next loop
-                    last_token = None 
-
-                except SessionPasswordNeeded:
-                    # 2FA
-                    if qr_message_id:
-                        try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                        except: pass
-                    hint = await client.get_password_hint()
-                    hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
-                    pwd_msg = await context.bot.send_message(
-                        chat_id=chat_id, 
-                        text=f"🔐 <b>2FA Required</b>{hint_text}\n\nPlease enter your password.", 
-                        parse_mode=ParseMode.HTML
-                    )
-                    context.user_data['pwd_msg_id'] = pwd_msg.message_id
-                    return PASSWORD
-                
-                except Exception as e:
-                    # Import failed (maybe timeout or network blip)
-                    # We log it and continue the loop. 
-                    # This will trigger ExportLoginToken on the NEW DC, showing a QR code as fallback.
-                    logger.error(f"Auto-Import Failed: {e}")
-                    pass
-                
+                # Wait briefly before checking status again
+                await asyncio.sleep(1.5)
                 continue
             
             else:
+                # Unexpected result type
                 await asyncio.sleep(1)
                 continue
 
         except SessionPasswordNeeded:
+            # 2FA Triggered
             if qr_message_id:
                 try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                 except: pass
@@ -297,13 +219,13 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             context.user_data['pwd_msg_id'] = pwd_msg.message_id
             return PASSWORD
         
-        except (AuthTokenExpired, RPCError, asyncio.TimeoutError):
-            # Network issue or timeout, just retry loop
+        except (AuthTokenExpired, RPCError):
+            # Token expired or network blip, retry loop to get new one
             await asyncio.sleep(1)
             continue
         
         except Exception as e:
-            logger.error(f"Critical QR Error: {e}")
+            logger.error(f"QR Error: {e}")
             await asyncio.sleep(1)
             continue
 
