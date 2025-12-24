@@ -81,9 +81,7 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     
     # --- Check if QR Flow was requested ---
     if context.user_data.get('is_qr_flow'):
-        # Send initial message that we will edit later
         status_msg = await update.message.reply_text(f"Name: <b>{unique_name}</b>\nPreparing QR Code... ⏳", parse_mode=ParseMode.HTML)
-        # Pass this message to the handler so it can edit it
         return await qr_login_handler(update, context, status_msg)
 
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
@@ -110,7 +108,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     )
     context.user_data['temp_client'] = client
 
-    # Use the passed message if available, otherwise send new
     if not status_msg:
         status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
     else:
@@ -127,6 +124,8 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     
     qr_message_id = status_msg.message_id
     chat_id = update.effective_chat.id
+    
+    last_token = None # Track token to prevent redundant edits
     
     try:
         while True:
@@ -153,7 +152,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     )
                 )
             except SessionPasswordNeeded:
-                # 2FA Triggered
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
@@ -161,18 +159,19 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 hint = await client.get_password_hint()
                 hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
                 
-                # Send a new message for password (or we could store a new ID, but this is a state change)
                 pwd_msg = await context.bot.send_message(
                     chat_id=chat_id, 
                     text=f"🔐 <b>2FA Required</b>{hint_text}\n\nYou scanned the code successfully! Please enter your password.", 
                     parse_mode=ParseMode.HTML
                 )
-                # Store this message ID to edit later if needed
                 context.user_data['pwd_msg_id'] = pwd_msg.message_id
                 return PASSWORD
+            
+            except AuthTokenExpired:
+                # Token expired, retry immediately to get a new one
+                continue
 
             if isinstance(token_result, types.auth.LoginTokenSuccess):
-                # Logged in directly
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
@@ -181,67 +180,71 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 return await finalize_login(update, context, client, success_msg)
 
             elif isinstance(token_result, types.auth.LoginToken):
-                # 2. Generate QR Image
-                # FIX: Use base64 encoding for the binary token
-                safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
-                url = f"tg://login?token={safe_token}"
-                
-                qr = qrcode.QRCode(border=2)
-                qr.add_data(url)
-                qr.make(fit=True)
-                img = qr.make_image(fill='black', back_color='white')
-                
-                bio = io.BytesIO()
-                img.save(bio)
-                bio.seek(0)
-                
-                # 3. Prepare Caption and Buttons
-                remaining = int(total_timeout - elapsed)
-                caption = (
-                    "⚡️ <b>QR Login</b>\n"
-                    "👆 Scan the QR code above for a quick and easy account adding.\n\n"
-                    f"⏳ <b>In total, you have {remaining} seconds.</b>\n"
-                    "-> This QR code is refreshed every ~30 seconds."
-                )
-                
-                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_qr")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-
-                # 4. Send or Edit Message
-                # We try to edit the media first. If it was text, we might need to delete and send photo.
-                try:
-                    await context.bot.edit_message_media(
-                        chat_id=chat_id,
-                        message_id=qr_message_id,
-                        media=InputMediaPhoto(media=bio, caption=caption, parse_mode=ParseMode.HTML),
-                        reply_markup=reply_markup
-                    )
-                except Exception:
-                    # If editing fails (e.g. changing text to photo not allowed by API in this context or mismatch)
-                    # We delete the old text message and send the photo
-                    try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                    except: pass
+                # Check if token changed
+                if last_token != token_result.token:
+                    last_token = token_result.token
                     
-                    sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-                    qr_message_id = sent.message_id
+                    # 2. Generate QR Image
+                    # Use standard base64url encoding without padding
+                    safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
+                    url = f"tg://login?token={safe_token}"
+                    
+                    qr = qrcode.QRCode(border=2)
+                    qr.add_data(url)
+                    qr.make(fit=True)
+                    img = qr.make_image(fill='black', back_color='white')
+                    
+                    bio = io.BytesIO()
+                    img.save(bio)
+                    bio.seek(0)
+                    
+                    # 3. Prepare Caption
+                    remaining = int(total_timeout - elapsed)
+                    caption = (
+                        "⚡️ <b>QR Login</b>\n"
+                        "👆 Scan the QR code above for a quick and easy account adding.\n\n"
+                        f"⏳ <b>In total, you have {remaining} seconds.</b>\n"
+                        "-> This QR code is refreshed every ~30 seconds."
+                    )
+                    
+                    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_qr")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    # 4. Send or Edit Message
+                    try:
+                        await context.bot.edit_message_media(
+                            chat_id=chat_id,
+                            message_id=qr_message_id,
+                            media=InputMediaPhoto(media=bio, caption=caption, parse_mode=ParseMode.HTML),
+                            reply_markup=reply_markup
+                        )
+                    except Exception:
+                        try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
+                        except: pass
+                        sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+                        qr_message_id = sent.message_id
                 
-                # 5. Wait loop
-                wait_until = time.time() + 5
+                # 5. Wait loop (Poll for status change)
+                # We loop in small increments to check timeout, but we don't spam ExportLoginToken too fast
+                # Telegram tokens usually valid for 30s. We check every 2s to catch Success faster.
+                wait_until = time.time() + 2
                 while time.time() < wait_until:
-                    await asyncio.sleep(1) 
+                    await asyncio.sleep(0.5)
                 
                 continue
 
             elif isinstance(token_result, types.auth.LoginTokenMigrateTo):
+                # DC Mismatch - Critical to reconnect
                 await client.session.switch_dc(token_result.dc_id)
+                await client.disconnect()
+                await client.connect()
+                last_token = None # Force regenerate QR
                 continue
             
             else:
                 await context.bot.send_message(chat_id=chat_id, text="❌ Unknown response from Telegram.")
                 return ConversationHandler.END
 
-    except AuthTokenExpired:
-        pass
     except Exception as e:
         logger.error(f"QR Error: {e}")
         if qr_message_id: 
@@ -322,7 +325,6 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
     
-    # --- Updated Styling ---
     delivery_text = "Send login code"
     if sent_code.type:
         type_str = str(sent_code.type).upper()
@@ -369,25 +371,11 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password, client = update.message.text, context.user_data['temp_client']
     
-    # Check if we have a saved message ID from QR flow or just reply
-    if 'pwd_msg_id' in context.user_data:
-        try:
-            # We can't edit the old message easily with text from user update, so we send a "Checking..." 
-            # OR we try to edit the specific message if we knew where it was.
-            # Simpler: just reply, but we pass this reply to finalize so it gets edited.
-            pass
-        except: pass
-
     msg = await update.message.reply_text("⏳ Checking password...")
-    
     try:
         await client.check_password(password)
-        # We edit here, then pass to finalize to edit AGAIN to "Success"
         await msg.edit_text("✅ Password correct! Adding account...")
-        
         context.user_data['successful_2fa_pwd'] = password
-        
-        # Pass the 'msg' object so finalize_login can edit it instead of sending new
         return await finalize_login(update, context, client, msg)
 
     except PasswordHashInvalid:
@@ -411,19 +399,15 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, client: Client, status_message=None):
     """
     Common function to export session, stop temp client, and start userbot.
-    status_message: If provided, this message object is edited with the final result.
     """
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
-    # 1. Export Session
     session_string = await client.export_session_string()
     
-    # 2. Stop Temp Client
     if client.is_connected: 
         await client.disconnect()
     
-    # 3. Start Actual Userbot
     status, user_info, detail = await start_userbot(
         session_string, 
         context.application, 
@@ -433,7 +417,6 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, cli
         device_model_to_use=persistent_device_model 
     )
     
-    # 4. Save 2FA Password if we had one
     pwd = context.user_data.get('successful_2fa_pwd')
     if status == "success" and pwd and accounts_collection is not None:
         try:
@@ -443,7 +426,6 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, cli
             )
         except Exception: pass
 
-    # 5. Send Result (Edit if possible)
     final_text = ""
     if status == "success":
         final_text = f"✅ Account <code>{escape_html(user_info.first_name)}</code> (<code>{escape_html(unique_name)}</code>) added successfully!"
@@ -454,11 +436,9 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, cli
         try:
             await status_message.edit_text(final_text, parse_mode=ParseMode.HTML)
         except Exception:
-            # Fallback if edit fails (e.g. message too old)
             try: await context.bot.send_message(chat_id=update.effective_chat.id, text=final_text, parse_mode=ParseMode.HTML)
             except: pass
     else:
-        # No message to edit provided
         try:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=final_text, parse_mode=ParseMode.HTML)
         except: pass
