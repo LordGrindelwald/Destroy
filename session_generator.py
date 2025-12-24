@@ -7,7 +7,7 @@ from pyrogram import Client
 from pyrogram.errors import (
     SessionPasswordNeeded, PasswordHashInvalid, FloodWait, 
     PhoneNumberInvalid, PhoneNumberBanned, AuthTokenExpired,
-    UserAlreadyParticipant, UserNotParticipant
+    RPCError
 )
 from pyrogram.raw import functions, types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -44,7 +44,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
 
-    # Handle /add -sess
     if not update.callback_query and context.args:
         if context.args[0] == '-sess':
             keyboard = [
@@ -55,7 +54,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_html("➕  <b>Add Account via Session</b>", reply_markup=reply_markup)
             return ConversationHandler.END
         
-        # Handle /add -qr
         if context.args[0] == '-qr':
             context.user_data['is_qr_flow'] = True
             await message.reply_text("📱 <b>QR Code Login</b>\n\nPlease send a unique name for this account first.", parse_mode=ParseMode.HTML)
@@ -85,13 +83,13 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
     return PHONE
 
-async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
-    """Handles the QR Code Login Loop with refresh and timeout."""
+async def create_new_client(update, context, dc_id=None):
+    """Helper to create a fresh client, optionally forcing a specific DC."""
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
     client = Client(
-        name=f"temp_gen_{update.effective_user.id}", 
+        name=f"temp_gen_{update.effective_user.id}_{int(time.time())}", # Unique name to prevent collision
         in_memory=True, 
         api_id=TD_API_ID,
         api_hash=TD_API_HASH,
@@ -103,12 +101,24 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         system_lang_code=TD_SYSTEM_LANG_CODE,
         lang_pack=TD_LANG_PACK
     )
+    
+    # Force DC if requested (Critical for Migration)
+    if dc_id:
+        client.session.dc_id = dc_id
+        
+    return client
+
+async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
+    """Handles the QR Code Login Loop with refresh and timeout."""
+    
+    # 1. Create Initial Client (Default DC)
+    client = await create_new_client(update, context)
     context.user_data['temp_client'] = client
 
     if not status_msg:
-        status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
+        status_msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     else:
-        await status_msg.edit_text("⏳ Connecting to Telegram Network...")
+        await status_msg.edit_text("⏳ Connecting to Telegram...")
 
     try:
         await client.connect()
@@ -123,74 +133,40 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     chat_id = update.effective_chat.id
     last_token = None
     
-    try:
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > total_timeout:
-                if qr_message_id:
-                    try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                    except: pass
-                await context.bot.send_message(chat_id=chat_id, text="❌ QR add timed out.")
-                if client.is_connected: await client.disconnect()
-                context.user_data.clear()
-                return ConversationHandler.END
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > total_timeout:
+            if qr_message_id:
+                try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
+                except: pass
+            await context.bot.send_message(chat_id=chat_id, text="❌ QR add timed out.")
+            if client.is_connected: await client.disconnect()
+            context.user_data.clear()
+            return ConversationHandler.END
 
-            try:
-                # Poll for the token
-                token_result = await client.invoke(
-                    functions.auth.ExportLoginToken(
-                        api_id=TD_API_ID,
-                        api_hash=TD_API_HASH,
-                        except_ids=[]
-                    )
+        try:
+            token_result = await client.invoke(
+                functions.auth.ExportLoginToken(
+                    api_id=TD_API_ID,
+                    api_hash=TD_API_HASH,
+                    except_ids=[]
                 )
-            except SessionPasswordNeeded:
-                # 2FA Triggered
-                if qr_message_id:
-                    try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-                    except: pass
-                
-                hint = await client.get_password_hint()
-                hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
-                
-                pwd_msg = await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=f"🔐 <b>2FA Required</b>{hint_text}\n\nYou scanned the code successfully! Please enter your password.", 
-                    parse_mode=ParseMode.HTML
-                )
-                context.user_data['pwd_msg_id'] = pwd_msg.message_id
-                return PASSWORD
+            )
             
-            except AuthTokenExpired:
-                continue
-
-            except Exception as e:
-                # Generic RPC error? Log and retry or fail
-                logger.error(f"RPC Error in QR Loop: {e}")
-                # Wait a bit before retrying to avoid spamming
-                await asyncio.sleep(1)
-                continue
-
+            # --- SUCCESS ---
             if isinstance(token_result, types.auth.LoginTokenSuccess):
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
                 
-                success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Verifying...")
-                
-                # IMPORTANT: Sync client state
-                try:
-                    user = await client.get_me()
-                except Exception as e:
-                    logger.warning(f"Could not get_me after QR success: {e}")
-                
+                success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Logging in...")
                 return await finalize_login(update, context, client, success_msg)
 
+            # --- STANDARD TOKEN ---
             elif isinstance(token_result, types.auth.LoginToken):
                 if last_token != token_result.token:
                     last_token = token_result.token
                     
-                    # Safe Base64
                     safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
                     url = f"tg://login?token={safe_token}"
                     
@@ -227,38 +203,67 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                         qr_message_id = sent.message_id
                 
-                # Wait and loop again to check status
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.5)
                 continue
 
+            # --- DC MIGRATION (The Fix) ---
             elif isinstance(token_result, types.auth.LoginTokenMigrateTo):
-                # Inform user about migration (optional, but good for debugging)
+                target_dc = token_result.dc_id
+                
                 try:
                     await context.bot.edit_message_caption(
                         chat_id=chat_id, 
                         message_id=qr_message_id, 
-                        caption="🔄 Switching to correct Telegram server... (New QR incoming)"
+                        caption=f"🔄 <b>Server Mismatch (DC {target_dc}).</b>\nMoving bot to correct server...\n\n⚠️ <b>Please scan the NEW code appearing shortly.</b>",
+                        parse_mode=ParseMode.HTML
                     )
                 except: pass
 
+                # 1. Disconnect Old
                 await client.disconnect()
-                client.session.dc_id = token_result.dc_id 
+                
+                # 2. Create FRESH Client with Target DC
+                # This ensures clean state and fresh time sync
+                client = await create_new_client(update, context, dc_id=target_dc)
+                context.user_data['temp_client'] = client # Update ref
+                
+                # 3. Connect New
                 await client.connect()
+                
+                # 4. Reset Loop State
                 last_token = None
+                # Loop continues and calls ExportLoginToken on new DC
                 continue
             
             else:
-                await context.bot.send_message(chat_id=chat_id, text="❌ Unknown response from Telegram.")
-                return ConversationHandler.END
+                await asyncio.sleep(1)
+                continue
 
-    except Exception as e:
-        logger.error(f"QR Error: {e}")
-        if qr_message_id: 
-            try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
-            except: pass
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error: {e}")
-        if client.is_connected: await client.disconnect()
-        return ConversationHandler.END
+        except SessionPasswordNeeded:
+            if qr_message_id:
+                try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
+                except: pass
+            
+            hint = await client.get_password_hint()
+            hint_text = f" (Hint: {escape_html(hint)})" if hint else ""
+            
+            pwd_msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=f"🔐 <b>2FA Required</b>{hint_text}\n\nYou scanned the code successfully! Please enter your password.", 
+                parse_mode=ParseMode.HTML
+            )
+            context.user_data['pwd_msg_id'] = pwd_msg.message_id
+            return PASSWORD
+        
+        except (AuthTokenExpired, RPCError) as e:
+            # Silent retry
+            await asyncio.sleep(1)
+            continue
+        
+        except Exception as e:
+            logger.error(f"Critical QR Error: {e}")
+            await asyncio.sleep(1)
+            continue
 
 
 @owner_only
@@ -366,11 +371,9 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password, client = update.message.text, context.user_data['temp_client']
     
-    # Try to edit the previous "Checking..." message if available
     msg = None
     if 'pwd_msg_id' in context.user_data:
-        # We can't get the message object easily, so we send a new one or just reply
-        # But we need a message object for finalize_login to edit.
+        # Just reply since we can't easily find the old message object from context unless we stored it
         msg = await update.message.reply_text("⏳ Checking password...")
     else:
         msg = await update.message.reply_text("⏳ Checking password...")
