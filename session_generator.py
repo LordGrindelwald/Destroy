@@ -143,12 +143,16 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             return ConversationHandler.END
 
         try:
-            token_result = await client.invoke(
-                functions.auth.ExportLoginToken(
-                    api_id=TD_API_ID,
-                    api_hash=TD_API_HASH,
-                    except_ids=[]
-                )
+            # Wrap Export in timeout to prevent hangs
+            token_result = await asyncio.wait_for(
+                client.invoke(
+                    functions.auth.ExportLoginToken(
+                        api_id=TD_API_ID,
+                        api_hash=TD_API_HASH,
+                        except_ids=[]
+                    )
+                ),
+                timeout=8.0
             )
             
             # --- SCENARIO 1: SUCCESS (Direct Login) ---
@@ -201,7 +205,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                         qr_message_id = sent.message_id
                 
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 continue
 
             # --- SCENARIO 3: DC MIGRATION (Seamless) ---
@@ -209,9 +213,8 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 target_dc = token_result.dc_id
                 migrated_token = token_result.token
 
-                # Seamless: Just update text, don't ask to rescan
+                # Seamless Feedback
                 try:
-                    # If we have a QR image, maybe switch it to text "Verifying..." or just caption
                     await context.bot.edit_message_caption(
                         chat_id=chat_id, 
                         message_id=qr_message_id, 
@@ -225,11 +228,11 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 client = await create_new_client(update, context, dc_id=target_dc)
                 context.user_data['temp_client'] = client
                 
-                # Robust connection
+                # Robust connection with timeout
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=15.0)
+                    await asyncio.wait_for(client.connect(), timeout=8.0)
                 except Exception:
-                     # Connection failed, loop back to try again or timeout
+                     # If connect fails, we just loop; UI will naturally refresh to QR or Timeout
                      await asyncio.sleep(1)
                      continue
 
@@ -237,7 +240,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 try:
                     import_result = await asyncio.wait_for(
                         client.invoke(functions.auth.ImportLoginToken(token=migrated_token)),
-                        timeout=10.0
+                        timeout=8.0
                     )
                     
                     if isinstance(import_result, types.auth.LoginTokenSuccess):
@@ -247,9 +250,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ Login Successful! Finalizing...")
                         return await finalize_login(update, context, client, success_msg)
                     
-                    # If Import returns generic LoginToken, it means we migrated but maybe need to poll again?
-                    # Or it failed silently. We clear last_token to force a refresh if needed, but 
-                    # usually Import -> Success.
+                    # If import didn't return Success, force a token refresh in next loop
                     last_token = None 
 
                 except SessionPasswordNeeded:
@@ -268,11 +269,10 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     return PASSWORD
                 
                 except Exception as e:
-                    # Import failed for some reason
+                    # Import failed (maybe timeout or network blip)
+                    # We log it and continue the loop. 
+                    # This will trigger ExportLoginToken on the NEW DC, showing a QR code as fallback.
                     logger.error(f"Auto-Import Failed: {e}")
-                    # We do NOT error out. We fall back to the loop.
-                    # This will call ExportLoginToken next, which will get a NEW token on the NEW DC.
-                    # The user will see a new QR code (Seamless fallback).
                     pass
                 
                 continue
@@ -297,7 +297,8 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             context.user_data['pwd_msg_id'] = pwd_msg.message_id
             return PASSWORD
         
-        except (AuthTokenExpired, RPCError):
+        except (AuthTokenExpired, RPCError, asyncio.TimeoutError):
+            # Network issue or timeout, just retry loop
             await asyncio.sleep(1)
             continue
         
