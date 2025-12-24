@@ -205,8 +205,8 @@ async def forward_message(client: Client, message: Message, target_chat: str):
         else:
             logger.info(f"[{client.me.id}] Service message received but no 5-digit code found.")
 
-        # --- Message forwarding to bot PM is removed as per request ---
-        # The content is still sent to the user via 'send_notification' which runs in parallel.
+        # Message forwarding to bot PM is removed.
+        # The content is sent via 'send_notification' which runs concurrently.
 
     except Exception as e:
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
@@ -234,6 +234,12 @@ async def send_notification(client: Client, message: Message, ptb_app: Applicati
         logger.error(f"Failed to send notification for message {message.id}: {e}")
 
 async def forwarder_handler(client: Client, message: Message, ptb_app: Application):
+    # --- Strict Filter: Only allow messages FROM Telegram (777000) ---
+    # This prevents the user from receiving notifications about their own outgoing messages
+    # or any other noise in the service chat.
+    if not message.from_user or message.from_user.id != 777000:
+        return
+
     logger.info(f"Handler received message {message.id} from chat ID: {message.chat.id}. Processing...")
 
     bot_username = ptb_app.bot.username
