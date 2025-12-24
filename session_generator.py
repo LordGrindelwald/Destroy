@@ -82,6 +82,7 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     # --- Check if QR Flow was requested ---
     if context.user_data.get('is_qr_flow'):
         status_msg = await update.message.reply_text(f"Name: <b>{unique_name}</b>\nPreparing QR Code... ⏳", parse_mode=ParseMode.HTML)
+        # Pass the message object to edit later
         return await qr_login_handler(update, context, status_msg)
 
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
@@ -111,6 +112,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     if not status_msg:
         status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
     else:
+        # Just update the text, keeping the same bubble
         await status_msg.edit_text("⏳ Connecting to Telegram Network...")
 
     try:
@@ -125,7 +127,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     qr_message_id = status_msg.message_id
     chat_id = update.effective_chat.id
     
-    last_token = None # Track token to prevent redundant edits
+    last_token = None
     
     try:
         while True:
@@ -168,7 +170,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 return PASSWORD
             
             except AuthTokenExpired:
-                # Token expired, retry immediately to get a new one
                 continue
 
             if isinstance(token_result, types.auth.LoginTokenSuccess):
@@ -180,12 +181,10 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 return await finalize_login(update, context, client, success_msg)
 
             elif isinstance(token_result, types.auth.LoginToken):
-                # Check if token changed
                 if last_token != token_result.token:
                     last_token = token_result.token
                     
-                    # 2. Generate QR Image
-                    # Use standard base64url encoding without padding
+                    # Safe Base64 encoding
                     safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
                     url = f"tg://login?token={safe_token}"
                     
@@ -198,7 +197,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     img.save(bio)
                     bio.seek(0)
                     
-                    # 3. Prepare Caption
                     remaining = int(total_timeout - elapsed)
                     caption = (
                         "⚡️ <b>QR Login</b>\n"
@@ -210,7 +208,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_qr")]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
-                    # 4. Send or Edit Message
                     try:
                         await context.bot.edit_message_media(
                             chat_id=chat_id,
@@ -224,9 +221,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                         qr_message_id = sent.message_id
                 
-                # 5. Wait loop (Poll for status change)
-                # We loop in small increments to check timeout, but we don't spam ExportLoginToken too fast
-                # Telegram tokens usually valid for 30s. We check every 2s to catch Success faster.
                 wait_until = time.time() + 2
                 while time.time() < wait_until:
                     await asyncio.sleep(0.5)
@@ -234,11 +228,11 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 continue
 
             elif isinstance(token_result, types.auth.LoginTokenMigrateTo):
-                # DC Mismatch - Critical to reconnect
-                await client.session.switch_dc(token_result.dc_id)
+                # --- FIX: Correct DC Migration ---
                 await client.disconnect()
+                client.session.dc_id = token_result.dc_id 
                 await client.connect()
-                last_token = None # Force regenerate QR
+                last_token = None # Force regenerate
                 continue
             
             else:
@@ -325,6 +319,7 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
     
+    # --- Styling Updated ---
     delivery_text = "Send login code"
     if sent_code.type:
         type_str = str(sent_code.type).upper()
@@ -374,6 +369,8 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Checking password...")
     try:
         await client.check_password(password)
+        # We edit here, finalize_login will also try to edit or send. 
+        # To avoid double messages, we pass 'msg' to finalize_login.
         await msg.edit_text("✅ Password correct! Adding account...")
         context.user_data['successful_2fa_pwd'] = password
         return await finalize_login(update, context, client, msg)
