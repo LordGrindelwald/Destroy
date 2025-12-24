@@ -26,7 +26,7 @@ from config import (
     TD_APP_VERSION, TD_LANG_CODE, 
     TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
-from utils import generate_device_name, escape_html, sanitize_unique_name
+from utils import generate_device_name, escape_html, sanitize_unique_name, encrypt_text, decrypt_text
 
 # --- NEW: Global Lock to prevent CPU Spikes ---
 # This ensures only ONE bot performs the heavy stop/start action at a time.
@@ -359,7 +359,7 @@ async def start_userbot(
             "first_name": me.first_name, 
             "username": me.username,
             "phone_number": me.phone_number, 
-            "session_string": session_string,
+            "session_string": encrypt_text(session_string), # ENCRYPTED SAVE
             "device_model": final_device_model,
         }
         if final_unique_name:
@@ -458,7 +458,10 @@ async def start_all_userbots_from_db(
     error_details = []
     
     for account in all_accounts:
-        session_str = account.get("session_string", "")
+        raw_session = account.get("session_string", "")
+        # DECRYPT BEFORE USING
+        session_str = decrypt_text(raw_session) 
+        
         device_model = account.get("device_model") 
         unique_name = account.get("unique_name") 
         

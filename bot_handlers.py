@@ -1,9 +1,11 @@
 import asyncio
 import sys # Import sys for restart
 import math 
+import os # Added for file handling in backup/restore
 from datetime import datetime
 from functools import partial
 from bson.objectid import ObjectId
+from bson.json_util import dumps, loads # Added for backup/restore
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
 from telegram.ext import (
     ContextTypes,
@@ -31,7 +33,7 @@ from config import (
 from utils import (
     owner_only, escape_html, clean_session_string, 
     get_account_from_arg, generate_device_name, COMMAND_FALLBACKS,
-    sanitize_unique_name
+    sanitize_unique_name, encrypt_text # Added encrypt_text
 )
 from userbot_logic import (
     start_userbot, start_all_userbots_from_db,
@@ -43,6 +45,129 @@ from session_generator import generate_command
 
 # --- Constants ---
 ACCOUNTS_PER_PAGE = 16 # 8 rows * 2 columns
+
+
+# --- NEW COMMANDS: Backup & Restore & Encryption ---
+
+@owner_only
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backups the MongoDB accounts collection to a JSON file."""
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+    
+    status_msg = await update.message.reply_text("⏳ Generating backup...")
+    
+    try:
+        # Run DB fetching in thread
+        data = await asyncio.to_thread(lambda: list(accounts_collection.find()))
+        
+        # Serialize to JSON (bson.json_util handles ObjectId and datetime)
+        json_data = dumps(data, indent=2)
+        
+        file_path = "userbot_backup.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(json_data)
+            
+        await update.message.reply_document(
+            document=open(file_path, "rb"),
+            filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            caption=f"📦 <b>Full Database Backup</b>\n\nContains {len(data)} accounts.",
+            parse_mode=ParseMode.HTML
+        )
+        
+        os.remove(file_path)
+        await status_msg.delete()
+        
+    except Exception as e:
+        logger.error(f"Backup failed: {e}")
+        await status_msg.edit_text(f"❌ Backup failed: {e}")
+
+@owner_only
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restores the database from a JSON file (replacing existing data)."""
+    msg = update.message
+    
+    # Check if a file is attached or replied to
+    document = msg.document
+    if not document and msg.reply_to_message:
+        document = msg.reply_to_message.document
+        
+    if not document:
+        await msg.reply_text("❌ Please send this command with a backup JSON file (or reply to one).")
+        return
+        
+    if accounts_collection is None:
+        await msg.reply_text("⚠️ Database connection error.")
+        return
+        
+    status_msg = await msg.reply_text("⏳ Downloading and verifying backup...")
+    
+    file_path = "temp_restore.json"
+    try:
+        telegram_file = await document.get_file()
+        await telegram_file.download_to_drive(file_path)
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            # bson.json_util.loads converts strings back to ObjectIds
+            data = loads(f.read())
+            
+        if not isinstance(data, list):
+            await status_msg.edit_text("❌ Invalid backup file format (Root must be a list).")
+            return
+            
+        await status_msg.edit_text(f"⚠️ <b>Restoring {len(data)} accounts...</b>\n\nExisting data will be wiped.", parse_mode=ParseMode.HTML)
+        
+        # Perform Restore
+        await asyncio.to_thread(accounts_collection.delete_many, {})
+        if data:
+            await asyncio.to_thread(accounts_collection.insert_many, data)
+            
+        await status_msg.edit_text(f"✅ <b>Restore Successful!</b>\n\nRestored {len(data)} accounts.\nPlease /restart the bot to apply changes.", parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Restore failed: {e}")
+        await status_msg.edit_text(f"❌ Restore failed: {e}")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+@owner_only
+async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Encrypts any plain-text session strings in the database."""
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+        
+    status_msg = await update.message.reply_text("🔐 Scanning database for unencrypted sessions...")
+    
+    try:
+        # Fetch all accounts
+        all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
+        encrypted_count = 0
+        
+        for acc in all_accounts:
+            raw_session = acc.get("session_string")
+            if raw_session and not raw_session.startswith("gAAAAA"):
+                # It doesn't look like a Fernet token, let's encrypt it
+                new_session = encrypt_text(raw_session)
+                
+                # Double check it actually changed
+                if new_session != raw_session:
+                    await asyncio.to_thread(
+                        accounts_collection.update_one,
+                        {"_id": acc["_id"]},
+                        {"$set": {"session_string": new_session}}
+                    )
+                    encrypted_count += 1
+        
+        await status_msg.edit_text(f"✅ <b>Encryption Complete</b>\n\nSuccessfully encrypted {encrypted_count} old accounts.", parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Encryption scan failed: {e}")
+        await status_msg.edit_text(f"❌ Error: {e}")
+
 
 # --- Command Handlers ---
 

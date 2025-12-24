@@ -6,96 +6,86 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler
 
 # Import from config
-from config import OWNER_ID, accounts_collection, logger
+from config import OWNER_ID, accounts_collection, logger, cipher_suite
 
-# --- NEW: Strict Sanitization ---
+# --- Encryption Helpers ---
+def encrypt_text(text: str) -> str:
+    """Encrypts a string. Returns the original text if encryption is disabled."""
+    if not text or not cipher_suite:
+        return text
+    try:
+        return cipher_suite.encrypt(text.encode()).decode()
+    except Exception as e:
+        logger.error(f"Encryption failed: {e}")
+        return text
+
+def decrypt_text(text: str) -> str:
+    """Decrypts a string. Returns original text if it's not encrypted or fails."""
+    if not text or not cipher_suite:
+        return text
+    try:
+        # Fernet tokens usually start with gAAAAA
+        if not text.startswith("gAAAAA"): 
+            return text
+        return cipher_suite.decrypt(text.encode()).decode()
+    except Exception as e:
+        logger.error(f"Decryption failed: {e}")
+        return text
+# --- End Encryption Helpers ---
+
 def sanitize_unique_name(name: str) -> str:
-    """
-    Enforces strict naming rules:
-    1. Lowercase only.
-    2. Alphanumeric only (a-z, 0-9).
-    3. No spaces or special characters.
-    4. Fallback if empty.
-    """
     if not name:
         return f"unnamed{random.randint(1000,9999)}"
-    
-    # Remove anything that is NOT a-z, A-Z, or 0-9
-    clean = re.sub(r'[^a-zA-Z0-9]', '', name)
-    
-    # Convert to lowercase
-    clean = clean.lower()
-    
+    # Allow alphanumeric only
+    clean = re.sub(r'[^a-zA-Z0-9]', '', name).lower()
     if not clean:
         return f"user{random.randint(1000,9999)}"
-        
     return clean
-# --- END NEW ---
 
-# --- NEW FUNCTION ---
 def parse_interval(interval_str: str) -> int:
-    """
-    Parses an interval string ("1440" or "30-90") and returns
-    a sleep duration in seconds.
-    """
     try:
         if "-" in interval_str:
             min_str, max_str = interval_str.split("-")
             min_val = int(min_str)
             max_val = int(max_str)
             if min_val <= max_val:
-                # Return a random value in the range, converted to seconds
                 return random.randint(min_val, max_val) * 60
         else:
-            # Return the static value, converted to seconds
             return int(interval_str) * 60
     except Exception as e:
         logger.warning(f"Invalid interval string '{interval_str}', defaulting to 1440 mins. Error: {e}")
-    
-    # Default: 1440 minutes (24 hours)
+    # Default 24 hours
     return 1440 * 60
-# --- END NEW FUNCTION ---
-
 
 def escape_html(text: str) -> str:
-    """Escapes special characters for Telegram HTML parsing."""
     if not isinstance(text, str): text = str(text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def clean_session_string(session_string: str) -> str:
-    """Thoroughly cleans the session string."""
+    """Removes spaces, newlines, and invisible characters."""
     return re.sub(r'[\s\x00-\x1f\x7f-\x9f]', '', session_string)
 
 def _load_device_names():
-    """Loads device names from the external file or uses a hardcoded fallback."""
     try:
-        # Assumes device_win11 is in the same directory as utils.py (i.e., /app)
         filepath = os.path.join(os.path.dirname(__file__), 'device_win11')
         with open(filepath, 'r') as f:
             names = [line.strip() for line in f if line.strip()]
-        if names:
-            return names
-        else:
-            logger.warning("device_win11 file was empty. Using fallback list.")
+        if names: return names
+        else: logger.warning("device_win11 file was empty. Using fallback list.")
     except Exception as e:
         logger.error(f"Failed to load device names from file: {e}. Using hardcoded fallback.")
     
-    # Hardcoded fallback list (must match the content of device_win11)
     return [
         "MSI B550", "Asus ROG Strix Z690E", "Gigabyte Aorus Master",
         "XPS Desktop", "Hp Pavilion Plus", "Lenovo Legion Tower", "Aurora R13"
     ]
 
-# Load names once when the module is imported
 DEVICE_NAMES = _load_device_names()
 
 def generate_device_name():
-    """Selects a realistic device name from the loaded list."""
-    if not DEVICE_NAMES:
-        return "Unknown Desktop"
+    if not DEVICE_NAMES: return "Unknown Desktop"
     return random.choice(DEVICE_NAMES)
 
-# --- Decorator for Owner-Only Access ---
 def owner_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -109,38 +99,32 @@ def owner_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# --- Helper Function (with the correct bug fix) ---
 async def get_account_from_arg(arg: str):
     """
-    Finds an account by its user_id or unique_name.
-    Returns the full account document from MongoDB.
+    Tries to find an account by User ID (int) first, then by Unique Name (str).
+    Returns the document or None.
     """
-    if accounts_collection is None:
-        return None
-        
+    if accounts_collection is None: return None
+    
     account = None
+    # 1. Try ID
     try:
-        # Try to find by user_id first
         user_id = int(arg)
         account = accounts_collection.find_one({"user_id": user_id})
     except ValueError:
-        # If not an int, it must be a unique_name
         pass
     
+    # 2. Try Name
     if account is None:
-        # Search by sanitized unique_name
-        # --- FIX: Use sanitization here ---
         clean_arg = sanitize_unique_name(arg)
         account = accounts_collection.find_one({"unique_name": clean_arg})
         
     return account
 
-
-# --- BUGFIX: Conversation Fallback ---
 async def end_conversation_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Generic fallback handler to end any active conversation
-    if a new command is received.
+    Universal fallback function that clears user_data and ends any active conversation
+    when a new command (like /start, /help) is issued.
     """
     logger.info("New command received, ending active conversation.")
     context.user_data.clear()
@@ -148,14 +132,10 @@ async def end_conversation_on_command(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("✖️ Previous action cancelled by new command. Please send your command again.")
     return ConversationHandler.END
 
-# --- THIS IS THE FIX ---
-# Removed add, remove, and online_interval from this list
-# as they are entry_points and should not be fallbacks.
+# Universal list of fallbacks to apply to ALL ConversationHandlers
 COMMAND_FALLBACKS = [
     CommandHandler("start", end_conversation_on_command),
     CommandHandler("settings", end_conversation_on_command),
-    # CommandHandler("add", end_conversation_on_command), # <-- REMOVED
-    # CommandHandler("remove", end_conversation_on_command), # <-- REMOVED
     CommandHandler("rename", end_conversation_on_command),
     CommandHandler("status", end_conversation_on_command),
     CommandHandler("temp", end_conversation_on_command),
@@ -167,6 +147,7 @@ COMMAND_FALLBACKS = [
     CommandHandler("toggle_otp_destroy", end_conversation_on_command),
     CommandHandler("restart", end_conversation_on_command),
     CommandHandler("deduplicate_db", end_conversation_on_command),
-    # CommandHandler("online_interval", end_conversation_on_command), # <-- REMOVED
+    CommandHandler("backup", end_conversation_on_command),
+    CommandHandler("restore", end_conversation_on_command),
+    CommandHandler("encrpast", end_conversation_on_command),
 ]
-# --- END BUGFIX ---
