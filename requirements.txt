@@ -3,3 +3,5 @@ pyroblack
 tgcrypto
 pymongo[srv]
 python-dotenv
+qrcode
+pillow
