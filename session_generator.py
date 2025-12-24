@@ -6,7 +6,8 @@ import qrcode
 from pyrogram import Client
 from pyrogram.errors import (
     SessionPasswordNeeded, PasswordHashInvalid, FloodWait, 
-    PhoneNumberInvalid, PhoneNumberBanned, AuthTokenExpired
+    PhoneNumberInvalid, PhoneNumberBanned, AuthTokenExpired,
+    UserAlreadyParticipant, UserNotParticipant
 )
 from pyrogram.raw import functions, types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -40,9 +41,11 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.callback_query.message
     context.user_data.clear()
 
+    if update.callback_query:
+        await update.callback_query.answer()
+
     # Handle /add -sess
-    is_callback = update.callback_query is not None
-    if not is_callback and context.args:
+    if not update.callback_query and context.args:
         if context.args[0] == '-sess':
             keyboard = [
                 [InlineKeyboardButton("Single String", callback_data="add_single")],
@@ -57,9 +60,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['is_qr_flow'] = True
             await message.reply_text("📱 <b>QR Code Login</b>\n\nPlease send a unique name for this account first.", parse_mode=ParseMode.HTML)
             return UNIQUE_NAME_GEN
-
-    if update.callback_query:
-        await update.callback_query.answer()
         
     await message.reply_text("Please send a unique name (e.g., 'work_acct') for this new account. Send /cancel to stop.")
     return UNIQUE_NAME_GEN
@@ -67,7 +67,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves unique name, selects persistent device model, and asks for phone number OR starts QR flow."""
-    
     raw_input = update.message.text.strip().split()[0]
     unique_name = sanitize_unique_name(raw_input)
     
@@ -79,10 +78,8 @@ async def get_unique_name_for_generate(update: Update, context: ContextTypes.DEF
     context.user_data['unique_name'] = unique_name
     context.user_data['persistent_device_model'] = persistent_device_model
     
-    # --- Check if QR Flow was requested ---
     if context.user_data.get('is_qr_flow'):
         status_msg = await update.message.reply_text(f"Name: <b>{unique_name}</b>\nPreparing QR Code... ⏳", parse_mode=ParseMode.HTML)
-        # Pass the message object to edit later
         return await qr_login_handler(update, context, status_msg)
 
     await update.message.reply_text(f"Name: <b>{unique_name}</b>\nInput Phone Number", parse_mode=ParseMode.HTML)
@@ -93,7 +90,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
-    # Initialize Client
     client = Client(
         name=f"temp_gen_{update.effective_user.id}", 
         in_memory=True, 
@@ -112,7 +108,6 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     if not status_msg:
         status_msg = await update.message.reply_text("⏳ Connecting to Telegram Network...")
     else:
-        # Just update the text, keeping the same bubble
         await status_msg.edit_text("⏳ Connecting to Telegram Network...")
 
     try:
@@ -126,26 +121,22 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     
     qr_message_id = status_msg.message_id
     chat_id = update.effective_chat.id
-    
     last_token = None
     
     try:
         while True:
-            # Check Total Timeout
             elapsed = time.time() - start_time
             if elapsed > total_timeout:
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
-                
                 await context.bot.send_message(chat_id=chat_id, text="❌ QR add timed out.")
-                
                 if client.is_connected: await client.disconnect()
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            # 1. Generate/Export Login Token
             try:
+                # Poll for the token
                 token_result = await client.invoke(
                     functions.auth.ExportLoginToken(
                         api_id=TD_API_ID,
@@ -154,6 +145,7 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     )
                 )
             except SessionPasswordNeeded:
+                # 2FA Triggered
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
@@ -172,19 +164,33 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             except AuthTokenExpired:
                 continue
 
+            except Exception as e:
+                # Generic RPC error? Log and retry or fail
+                logger.error(f"RPC Error in QR Loop: {e}")
+                # Wait a bit before retrying to avoid spamming
+                await asyncio.sleep(1)
+                continue
+
             if isinstance(token_result, types.auth.LoginTokenSuccess):
                 if qr_message_id:
                     try: await context.bot.delete_message(chat_id=chat_id, message_id=qr_message_id)
                     except: pass
                 
-                success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Logging in...")
+                success_msg = await context.bot.send_message(chat_id=chat_id, text="✅ QR Scanned! Verifying...")
+                
+                # IMPORTANT: Sync client state
+                try:
+                    user = await client.get_me()
+                except Exception as e:
+                    logger.warning(f"Could not get_me after QR success: {e}")
+                
                 return await finalize_login(update, context, client, success_msg)
 
             elif isinstance(token_result, types.auth.LoginToken):
                 if last_token != token_result.token:
                     last_token = token_result.token
                     
-                    # Safe Base64 encoding
+                    # Safe Base64
                     safe_token = base64.urlsafe_b64encode(token_result.token).decode('utf-8').rstrip('=')
                     url = f"tg://login?token={safe_token}"
                     
@@ -221,18 +227,24 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                         sent = await context.bot.send_photo(chat_id=chat_id, photo=bio, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
                         qr_message_id = sent.message_id
                 
-                wait_until = time.time() + 2
-                while time.time() < wait_until:
-                    await asyncio.sleep(0.5)
-                
+                # Wait and loop again to check status
+                await asyncio.sleep(1)
                 continue
 
             elif isinstance(token_result, types.auth.LoginTokenMigrateTo):
-                # --- FIX: Correct DC Migration ---
+                # Inform user about migration (optional, but good for debugging)
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id, 
+                        message_id=qr_message_id, 
+                        caption="🔄 Switching to correct Telegram server... (New QR incoming)"
+                    )
+                except: pass
+
                 await client.disconnect()
                 client.session.dc_id = token_result.dc_id 
                 await client.connect()
-                last_token = None # Force regenerate
+                last_token = None
                 continue
             
             else:
@@ -251,31 +263,23 @@ async def qr_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 
 @owner_only
 async def cancel_qr_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback for the QR Cancel button."""
     query = update.callback_query
     await query.answer()
-    
-    try:
-        await query.message.delete()
+    try: await query.message.delete()
     except: pass
-    
     await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ QR add cancelled.")
-    
     if 'temp_client' in context.user_data:
         client = context.user_data.get('temp_client')
         if client and client.is_connected: await client.disconnect()
     context.user_data.clear()
     return ConversationHandler.END
 
-
 @owner_only
 async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Standard Phone Number flow."""
     phone = update.message.text.strip()
     msg = await update.message.reply_text("⏳ Connecting to Telegram...")
     
     persistent_device_model = context.user_data.get('persistent_device_model')
-    
     client = Client(
         name=f"temp_gen_{update.effective_user.id}", 
         in_memory=True, 
@@ -319,7 +323,6 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.update({'phone': phone, 'phone_code_hash': sent_code.phone_code_hash, 'temp_client': client})
     
-    # --- Styling Updated ---
     delivery_text = "Send login code"
     if sent_code.type:
         type_str = str(sent_code.type).upper()
@@ -333,10 +336,8 @@ async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delivery_text = f"☑️ Code sent via <b>{escape_html(type_str)}</b>"
     
     delivery_text += "\n\n👇 Send the code below."
-
     await msg.edit_text(delivery_text, parse_mode=ParseMode.HTML)
     return CODE
-
 
 @owner_only
 async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,16 +362,21 @@ async def get_login_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return ConversationHandler.END
 
-
 @owner_only
 async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password, client = update.message.text, context.user_data['temp_client']
     
-    msg = await update.message.reply_text("⏳ Checking password...")
+    # Try to edit the previous "Checking..." message if available
+    msg = None
+    if 'pwd_msg_id' in context.user_data:
+        # We can't get the message object easily, so we send a new one or just reply
+        # But we need a message object for finalize_login to edit.
+        msg = await update.message.reply_text("⏳ Checking password...")
+    else:
+        msg = await update.message.reply_text("⏳ Checking password...")
+
     try:
         await client.check_password(password)
-        # We edit here, finalize_login will also try to edit or send. 
-        # To avoid double messages, we pass 'msg' to finalize_login.
         await msg.edit_text("✅ Password correct! Adding account...")
         context.user_data['successful_2fa_pwd'] = password
         return await finalize_login(update, context, client, msg)
@@ -392,11 +398,7 @@ async def get_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return ConversationHandler.END
 
-
 async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, client: Client, status_message=None):
-    """
-    Common function to export session, stop temp client, and start userbot.
-    """
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model')
     
@@ -443,7 +445,6 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, cli
     context.user_data.clear()
     return ConversationHandler.END
 
-
 @owner_only
 async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'temp_client' in context.user_data:
@@ -454,10 +455,8 @@ async def cancel_command_conv(update: Update, context: ContextTypes.DEFAULT_TYPE
     cancel_text = "✖️ Process cancelled."
     if update.callback_query:
         await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text(cancel_text)
-        except:
-             await update.callback_query.message.reply_text(cancel_text)
+        try: await update.callback_query.edit_message_text(cancel_text)
+        except: await update.callback_query.message.reply_text(cancel_text)
     else:
         await update.message.reply_text(cancel_text)
     return ConversationHandler.END
