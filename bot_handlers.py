@@ -176,55 +176,54 @@ async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYP
 @owner_only
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Detects and fixes accounts in the DB that are missing a 'user_id'.
-    It decrypts their session, connects temporarily, and saves the correct ID.
+    Force Syncs ALL accounts. 
+    It iterates every account in the DB, connects to Telegram, retrieves the 
+    REAL user_id and first_name, and updates the database.
+    This fixes broken mentions caused by incorrect/stale cached IDs.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
 
-    status_msg = await update.message.reply_text("🔍 Scanning for corrupted account entries (missing user_id)...")
-
-    # Find documents where user_id is null or missing
-    ghosts = await asyncio.to_thread(
-        lambda: list(accounts_collection.find({
-            "$or": [{"user_id": None}, {"user_id": {"$exists": False}}]
-        }))
-    )
-
-    if not ghosts:
-        await status_msg.edit_text("✅ All accounts look healthy (no missing user_ids found).")
-        return
-
-    await status_msg.edit_text(f"⚠️ Found {len(ghosts)} corrupted entries. Attempting repairs...")
+    # Fetch ALL accounts
+    all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
+    total_count = len(all_accounts)
     
+    status_msg = await update.message.reply_text(f"🔄 <b>Force Sync Started</b>\n\nScanning {total_count} accounts.\nThis will connect to each account to fetch the real ID.", parse_mode=ParseMode.HTML)
+
     fixed_count = 0
+    updated_count = 0
     failed_count = 0
     log_lines = []
 
-    for ghost in ghosts:
-        name = ghost.get('unique_name', 'Unknown')
-        doc_id = ghost['_id']
+    for index, acc in enumerate(all_accounts):
+        name = acc.get('unique_name', 'Unknown')
+        doc_id = acc['_id']
+        old_id = acc.get('user_id')
         
+        # Update progress every 5 accounts
+        if index % 5 == 0:
+            await status_msg.edit_text(f"🔄 <b>Syncing Accounts...</b>\nProgress: {index}/{total_count}\nUpdated: {updated_count}\nFailed: {failed_count}", parse_mode=ParseMode.HTML)
+
         try:
             # 1. Decrypt session
-            raw_session = ghost.get("session_string")
-            session = decrypt_text(raw_session)
-            
-            if not session:
-                log_lines.append(f"❌ {name}: No session string found.")
+            raw_session = acc.get("session_string")
+            if not raw_session:
+                log_lines.append(f"❌ {name}: No session string.")
                 failed_count += 1
                 continue
-
-            # 2. Connect briefly to fetch ID
+                
+            session = decrypt_text(raw_session)
+            
+            # 2. Connect
             temp_client = Client(
-                name="temp_fix_repair",
+                name=f"sync_{doc_id}",
                 api_id=TD_API_ID,
                 api_hash=TD_API_HASH,
                 session_string=session,
                 in_memory=True,
-                no_updates=True, # We don't need updates, just get_me
-                device_model=ghost.get("device_model", "RepairBot"),
+                no_updates=True,
+                device_model=acc.get("device_model", "RepairBot"),
                 system_version=TD_SYSTEM_VERSION,
                 app_version=TD_APP_VERSION,
                 lang_code=TD_LANG_CODE,
@@ -234,30 +233,53 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await temp_client.connect()
             me = await temp_client.get_me()
-            correct_user_id = me.id
+            real_id = me.id
+            real_first_name = me.first_name or ""
+            real_username = me.username or None
+            real_phone = me.phone_number or acc.get('phone_number')
             await temp_client.disconnect()
 
-            # 3. Update the Database
-            await asyncio.to_thread(
-                accounts_collection.update_one,
-                {"_id": doc_id},
-                {"$set": {"user_id": correct_user_id}}
-            )
+            # 3. Check for differences and Update DB
+            updates = {}
+            if old_id != real_id:
+                updates["user_id"] = real_id
+                log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
+            
+            # Also sync names to ensure display is correct
+            if acc.get("first_name") != real_first_name:
+                updates["first_name"] = real_first_name
+            
+            if acc.get("username") != real_username:
+                updates["username"] = real_username
+
+            if acc.get("phone_number") != real_phone:
+                updates["phone_number"] = real_phone
+
+            if updates:
+                await asyncio.to_thread(
+                    accounts_collection.update_one,
+                    {"_id": doc_id},
+                    {"$set": updates}
+                )
+                updated_count += 1
             
             fixed_count += 1
-            log_lines.append(f"✅ Fixed <b>{name}</b> -> ID: <code>{correct_user_id}</code>")
 
         except Exception as e:
             failed_count += 1
-            log_lines.append(f"⚠️ Failed <b>{name}</b>: {e}")
+            # log_lines.append(f"⚠️ {name} failed: {e}") # Reduce spam in logs
+            logger.error(f"Sync failed for {name}: {e}")
 
     final_text = (
-        f"🔧 <b>Repair Complete</b>\n"
-        f"Fixed: {fixed_count}\n"
-        f"Failed: {failed_count}\n\n" + 
-        "\n".join(log_lines)
+        f"✅ <b>Sync Complete</b>\n"
+        f"Total Scanned: {total_count}\n"
+        f"Updates Applied: {updated_count}\n"
+        f"Failed to Connect: {failed_count}\n\n" +
+        "\n".join(log_lines[:10]) # Only show first 10 significant logs
     )
-    
+    if len(log_lines) > 10:
+        final_text += f"\n...and {len(log_lines)-10} more changes."
+
     await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
 
 
@@ -2402,3 +2424,112 @@ two_fa_conv = ConversationHandler(
     ],
     conversation_timeout=600
 )
+
+@owner_only
+async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Force Syncs ALL accounts. 
+    It iterates every account in the DB, connects to Telegram, retrieves the 
+    REAL user_id and first_name, and updates the database.
+    This fixes broken mentions caused by incorrect/stale cached IDs.
+    """
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+
+    # Fetch ALL accounts
+    all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
+    total_count = len(all_accounts)
+    
+    status_msg = await update.message.reply_text(f"🔄 <b>Force Sync Started</b>\n\nScanning {total_count} accounts.\nThis will connect to each account to fetch the real ID.", parse_mode=ParseMode.HTML)
+
+    fixed_count = 0
+    updated_count = 0
+    failed_count = 0
+    log_lines = []
+
+    for index, acc in enumerate(all_accounts):
+        name = acc.get('unique_name', 'Unknown')
+        doc_id = acc['_id']
+        old_id = acc.get('user_id')
+        
+        # Update progress every 5 accounts
+        if index % 5 == 0:
+            await status_msg.edit_text(f"🔄 <b>Syncing Accounts...</b>\nProgress: {index}/{total_count}\nUpdated: {updated_count}\nFailed: {failed_count}", parse_mode=ParseMode.HTML)
+
+        try:
+            # 1. Decrypt session
+            raw_session = acc.get("session_string")
+            if not raw_session:
+                log_lines.append(f"❌ {name}: No session string.")
+                failed_count += 1
+                continue
+                
+            session = decrypt_text(raw_session)
+            
+            # 2. Connect
+            temp_client = Client(
+                name=f"sync_{doc_id}",
+                api_id=TD_API_ID,
+                api_hash=TD_API_HASH,
+                session_string=session,
+                in_memory=True,
+                no_updates=True,
+                device_model=acc.get("device_model", "RepairBot"),
+                system_version=TD_SYSTEM_VERSION,
+                app_version=TD_APP_VERSION,
+                lang_code=TD_LANG_CODE,
+                system_lang_code=TD_SYSTEM_LANG_CODE,
+                lang_pack=TD_LANG_PACK
+            )
+            
+            await temp_client.connect()
+            me = await temp_client.get_me()
+            real_id = me.id
+            real_first_name = me.first_name or ""
+            real_username = me.username or None
+            real_phone = me.phone_number or acc.get('phone_number')
+            await temp_client.disconnect()
+
+            # 3. Check for differences and Update DB
+            updates = {}
+            if old_id != real_id:
+                updates["user_id"] = real_id
+                log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
+            
+            # Also sync names to ensure display is correct
+            if acc.get("first_name") != real_first_name:
+                updates["first_name"] = real_first_name
+            
+            if acc.get("username") != real_username:
+                updates["username"] = real_username
+
+            if acc.get("phone_number") != real_phone:
+                updates["phone_number"] = real_phone
+
+            if updates:
+                await asyncio.to_thread(
+                    accounts_collection.update_one,
+                    {"_id": doc_id},
+                    {"$set": updates}
+                )
+                updated_count += 1
+            
+            fixed_count += 1
+
+        except Exception as e:
+            failed_count += 1
+            # log_lines.append(f"⚠️ {name} failed: {e}") # Reduce spam in logs
+            logger.error(f"Sync failed for {name}: {e}")
+
+    final_text = (
+        f"✅ <b>Sync Complete</b>\n"
+        f"Total Scanned: {total_count}\n"
+        f"Updates Applied: {updated_count}\n"
+        f"Failed to Connect: {failed_count}\n\n" +
+        "\n".join(log_lines[:10]) # Only show first 10 significant logs
+    )
+    if len(log_lines) > 10:
+        final_text += f"\n...and {len(log_lines)-10} more changes."
+
+    await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
