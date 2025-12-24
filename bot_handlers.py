@@ -427,7 +427,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handles /accs command.
     /accs (default): Shows concise list.
     /accs -de: Shows detailed list.
-    **CHUNKED**: Splits message if >4096 chars.
+    **CHUNKED**: Splits message if >4096 chars OR >50 accounts.
     """
     if accounts_collection is None:
         await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
@@ -442,17 +442,35 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("You own 0 Accounts!")
         return
 
-    # --- Helper to send chunks ---
+    # --- Helper to send chunks with Account Limit ---
     async def send_smart_chunks(header, items):
-        """Sends a list of items in chunks to avoid Telegram 4096 char limit."""
+        """
+        Sends a list of items in chunks.
+        Splits if:
+        1. Character count exceeds 4000 (Telegram limit is 4096).
+        2. Item count exceeds 50 (User preference).
+        """
         current_chunk = header
+        current_count = 0 # Track number of items in current chunk
+        
         for item in items:
-            # +1 for newline
-            if len(current_chunk) + len(item) + 1 > 4000:
+            # Check limits: Char limit (safe buffer 4000) OR Item count limit (50)
+            if (len(current_chunk) + len(item) + 1 > 4000) or (current_count >= 50):
+                # Send the accumulated chunk
                 await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+                
+                # Start new chunk with the current item
                 current_chunk = item
+                current_count = 1
             else:
-                current_chunk += "\n" + item
+                # Add newline only if it's not the very first line (header logic handled by init)
+                if current_count == 0 and current_chunk == "":
+                     current_chunk = item
+                else:
+                     current_chunk += "\n" + item
+                current_count += 1
+                
+        # Send remaining chunk
         if current_chunk:
             await update.message.reply_html(current_chunk, disable_web_page_preview=True)
     # -----------------------------
@@ -476,8 +494,15 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
             device_model = acc.get('device_model', 'N/A')
             
+            # --- FIX: Ensure user_id is int for valid link ---
+            try:
+                safe_user_id = int(user_id) if user_id else None
+            except (ValueError, TypeError):
+                safe_user_id = None
+
             link_text_content = first_name or (f"ID: {user_id}" if user_id else "Unknown")
-            mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>" if user_id else link_text_content
+            mention_link = f"<a href=\"tg://user?id={safe_user_id}\">{link_text_content}</a>" if safe_user_id else link_text_content
+            
             name_display = mention_link
             if unique_name:
                 name_display += f" ({unique_name})"
@@ -514,7 +539,13 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif user_id:
             display_name = f"ID: {user_id}"
             
-        mention = f"<a href=\"tg://user?id={user_id}\">{display_name}</a>" if user_id else display_name
+        # --- FIX: Ensure user_id is int for valid link ---
+        try:
+            safe_user_id = int(user_id) if user_id else None
+        except (ValueError, TypeError):
+            safe_user_id = None
+
+        mention = f"<a href=\"tg://user?id={safe_user_id}\">{display_name}</a>" if safe_user_id else display_name
         
         phone = acc.get('phone_number')
         phone_str = f"+<code>{escape_html(phone)}</code>" if phone else "No Phone"
@@ -565,7 +596,14 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             device_model = acc.get('device_model', 'N/A')
             
             link_text_content = first_name or (f"ID: {user_id}" if user_id else "Unknown (Refresh required)")
-            mention_link = f"<a href=\"tg://user?id={user_id}\">{link_text_content}</a>" if user_id else link_text_content
+            
+            try:
+                safe_user_id = int(user_id) if user_id else None
+            except:
+                safe_user_id = None
+
+            mention_link = f"<a href=\"tg://user?id={safe_user_id}\">{link_text_content}</a>" if safe_user_id else link_text_content
+            
             name_display = mention_link
             if unique_name:
                 name_display += f" ({unique_name})"
