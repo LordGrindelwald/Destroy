@@ -18,6 +18,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 # --- FIX: Removed CloudPasswordNeeded ---
 from pyrogram.errors import PasswordHashInvalid, BadRequest
+from pyrogram import Client # --- NEW IMPORT for fix_db ---
 
 # Import from our own modules
 from config import (
@@ -27,13 +28,17 @@ from config import (
     AWAIT_BUTTON, SELECT_ACCOUNTS, AWAIT_INTERVAL,
     AWAIT_BUTTON_REMOVE, SELECT_ACCOUNTS_REMOVE, AWAIT_CONFIRM_REMOVE,
     # --- NEW STATES ---
-    AWAIT_BUTTON_2FA, SELECT_ACCOUNTS_2FA, AWAIT_DELAY_2FA, AWAIT_PASSWORD_2FA, AWAIT_HINT_2FA, AWAIT_CURRENT_2FA_PASSWORD
+    AWAIT_BUTTON_2FA, SELECT_ACCOUNTS_2FA, AWAIT_DELAY_2FA, AWAIT_PASSWORD_2FA, AWAIT_HINT_2FA, AWAIT_CURRENT_2FA_PASSWORD,
+    # --- NEW IMPORTS FOR FIX_DB ---
+    TD_API_ID, TD_API_HASH, TD_SYSTEM_VERSION, 
+    TD_APP_VERSION, TD_LANG_CODE, 
+    TD_SYSTEM_LANG_CODE, TD_LANG_PACK
 )
 # --- BUGFIX: Import COMMAND_FALLBACKS from utils ---
 from utils import (
     owner_only, escape_html, clean_session_string, 
     get_account_from_arg, generate_device_name, COMMAND_FALLBACKS,
-    sanitize_unique_name, encrypt_text # Added encrypt_text
+    sanitize_unique_name, encrypt_text, decrypt_text # Added decrypt_text
 )
 from userbot_logic import (
     start_userbot, start_all_userbots_from_db,
@@ -167,6 +172,93 @@ async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Encryption scan failed: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
+
+@owner_only
+async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Detects and fixes accounts in the DB that are missing a 'user_id'.
+    It decrypts their session, connects temporarily, and saves the correct ID.
+    """
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+
+    status_msg = await update.message.reply_text("🔍 Scanning for corrupted account entries (missing user_id)...")
+
+    # Find documents where user_id is null or missing
+    ghosts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find({
+            "$or": [{"user_id": None}, {"user_id": {"$exists": False}}]
+        }))
+    )
+
+    if not ghosts:
+        await status_msg.edit_text("✅ All accounts look healthy (no missing user_ids found).")
+        return
+
+    await status_msg.edit_text(f"⚠️ Found {len(ghosts)} corrupted entries. Attempting repairs...")
+    
+    fixed_count = 0
+    failed_count = 0
+    log_lines = []
+
+    for ghost in ghosts:
+        name = ghost.get('unique_name', 'Unknown')
+        doc_id = ghost['_id']
+        
+        try:
+            # 1. Decrypt session
+            raw_session = ghost.get("session_string")
+            session = decrypt_text(raw_session)
+            
+            if not session:
+                log_lines.append(f"❌ {name}: No session string found.")
+                failed_count += 1
+                continue
+
+            # 2. Connect briefly to fetch ID
+            temp_client = Client(
+                name="temp_fix_repair",
+                api_id=TD_API_ID,
+                api_hash=TD_API_HASH,
+                session_string=session,
+                in_memory=True,
+                no_updates=True, # We don't need updates, just get_me
+                device_model=ghost.get("device_model", "RepairBot"),
+                system_version=TD_SYSTEM_VERSION,
+                app_version=TD_APP_VERSION,
+                lang_code=TD_LANG_CODE,
+                system_lang_code=TD_SYSTEM_LANG_CODE,
+                lang_pack=TD_LANG_PACK
+            )
+            
+            await temp_client.connect()
+            me = await temp_client.get_me()
+            correct_user_id = me.id
+            await temp_client.disconnect()
+
+            # 3. Update the Database
+            await asyncio.to_thread(
+                accounts_collection.update_one,
+                {"_id": doc_id},
+                {"$set": {"user_id": correct_user_id}}
+            )
+            
+            fixed_count += 1
+            log_lines.append(f"✅ Fixed <b>{name}</b> -> ID: <code>{correct_user_id}</code>")
+
+        except Exception as e:
+            failed_count += 1
+            log_lines.append(f"⚠️ Failed <b>{name}</b>: {e}")
+
+    final_text = (
+        f"🔧 <b>Repair Complete</b>\n"
+        f"Fixed: {fixed_count}\n"
+        f"Failed: {failed_count}\n\n" + 
+        "\n".join(log_lines)
+    )
+    
+    await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
 
 
 # --- Command Handlers ---
