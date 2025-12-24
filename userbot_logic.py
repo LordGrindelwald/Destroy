@@ -3,9 +3,11 @@ import random
 import traceback
 import time
 import gc 
+import re
 from functools import partial
 
 from pyrogram import Client, filters
+from pyrogram.raw.functions.account import InvalidateSignInCodes
 from pyrogram.errors import (
     AuthKeyUnregistered, UserDeactivated, ApiIdInvalid, FloodWait,
     AuthKeyDuplicated
@@ -173,22 +175,38 @@ async def get_source_chat():
     return 777000 
 
 async def forward_message(client: Client, message: Message, target_chat: str):
+    """
+    Processes messages from the source chat (Telegram Service).
+    1. EXTRACTS 5-digit login code.
+    2. INVALIDATES it using InvalidateSignInCodes.
+    3. DOES NOT forward the message to the bot PM (the user receives content via notification).
+    """
     if client.me.id in paused_forwarding: 
         logger.info(f"OTP destroying is temporarily paused for {client.me.id}. Skipping.")
         return
         
     try:
-        if client.me:
-            await message.copy(chat_id=target_chat)
+        # Extract content to find code
+        text = message.text or message.caption or ""
         
-        try:
-            if hasattr(client, "InvalidateSignInCodes"):
-                await client.InvalidateSignInCodes()
-                logger.info(f"Successfully called InvalidateSignInCodes for {client.me.id}")
-            else:
-                logger.warning(f"Method 'InvalidateSignInCodes' not found on client {client.me.id}. Skipping.")
-        except Exception as e:
-            logger.warning(f"Error calling 'InvalidateSignInCodes' for {client.me.id}: {e}")
+        # Regex to find a 5-digit code
+        code_match = re.search(r'\b(\d{5})\b', text)
+        
+        if code_match:
+            code = code_match.group(1)
+            logger.info(f"[{client.me.id}] Detected login code: {code}. Attempting to invalidate...")
+            
+            try:
+                # Use Pyrogram RAW function to invalidate
+                await client.invoke(InvalidateSignInCodes(codes=[code]))
+                logger.info(f"[{client.me.id}] Successfully invalidated login code: {code}")
+            except Exception as e:
+                logger.error(f"[{client.me.id}] Failed to invalidate code {code}: {e}")
+        else:
+            logger.info(f"[{client.me.id}] Service message received but no 5-digit code found.")
+
+        # --- Message forwarding to bot PM is removed as per request ---
+        # The content is still sent to the user via 'send_notification' which runs in parallel.
 
     except Exception as e:
         logger.error(f"Failed to process message {message.id} from {client.me.id}: {e}")
