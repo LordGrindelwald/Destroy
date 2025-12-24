@@ -427,6 +427,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Handles /accs command.
     /accs (default): Shows concise list.
     /accs -de: Shows detailed list.
+    **CHUNKED**: Splits message if >4096 chars.
     """
     if accounts_collection is None:
         await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
@@ -437,16 +438,30 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lambda: list(accounts_collection.find().sort("unique_name", 1))
     )
     
-    # --- NEW: Detailed View ---
-    if context.args and context.args[0] == "-de":
-        base_text = "👤 <b>Your Managed Accounts (Detailed):</b>\n\n"
-        text_parts = []
+    if not accounts:
+        await update.message.reply_html("You own 0 Accounts!")
+        return
 
-        if not accounts:
-            base_text += "No accounts have been added yet."
-            await update.message.reply_html(base_text)
-            return
-        
+    # --- Helper to send chunks ---
+    async def send_smart_chunks(header, items):
+        """Sends a list of items in chunks to avoid Telegram 4096 char limit."""
+        current_chunk = header
+        for item in items:
+            # +1 for newline
+            if len(current_chunk) + len(item) + 1 > 4000:
+                await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+                current_chunk = item
+            else:
+                current_chunk += "\n" + item
+        if current_chunk:
+            await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+    # -----------------------------
+
+    # --- DETAILED VIEW ---
+    if context.args and context.args[0] == "-de":
+        header_text = "👤 <b>Your Managed Accounts (Detailed):</b>\n"
+        items = []
+
         for acc in accounts:
             user_id = acc.get('user_id')
             raw_first_name = acc.get('first_name')
@@ -475,18 +490,15 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f" ({escape_html(online_interval)} min)\n" 
                 f"<b>ID:</b> {user_id if user_id else 'N/A'}"
             )
-            text_parts.append(entry_text)
+            # Add separator for readability
+            items.append(entry_text + f"\n{'-'*25}")
         
-        final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
-        await update.message.reply_html(final_text, disable_web_page_preview=True)
+        await send_smart_chunks(header_text, items)
         return
 
-    # --- NEW: Default Concise View ---
-    if not accounts:
-        await update.message.reply_html("You own 0 Accounts!")
-        return
-        
-    text_parts = [f"You own {len(accounts)} Accounts!\n"]
+    # --- CONCISE VIEW (Default) ---
+    header_text = f"You own {len(accounts)} Accounts!\n"
+    items = []
     
     for acc in accounts:
         user_id = acc.get('user_id')
@@ -510,10 +522,9 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         interval = acc.get('online_interval', '1440')
         interval_str = f" (⌚ {interval}m)" if interval != '1440' else ""
         
-        text_parts.append(f"👉 {mention}: {phone_str}{interval_str}")
+        items.append(f"👉 {mention}: {phone_str}{interval_str}")
 
-    final_text = "\n".join(text_parts)
-    await update.message.reply_html(final_text, disable_web_page_preview=True)
+    await send_smart_chunks(header_text, items)
 
 
 @owner_only
@@ -575,12 +586,28 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
-        text=final_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
-        disable_web_page_preview=True 
-    )
+    # Note: Telegram edit_message_text is strict about limits (4096).
+    # Since this is an inline menu response, we cannot easily "split" it into multiple messages
+    # without deleting the old one and sending new ones, which breaks the flow.
+    # If this menu is too long, the user should use /accs instead.
+    try:
+        await query.edit_message_text(
+            text=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True 
+        )
+    except Exception as e:
+        if "Message is too long" in str(e):
+             await query.edit_message_text(
+                "⚠️ <b>Too many accounts to display in this menu.</b>\n"
+                "Please use the <code>/accs</code> or <code>/accs -de</code> command instead, "
+                "which supports multi-message splitting.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+             )
+        else:
+             logger.error(f"Error in accounts_menu: {e}")
 
 # --- execute_remove_account is now part of the remove_conv ---
 
