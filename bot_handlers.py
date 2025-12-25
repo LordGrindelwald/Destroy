@@ -580,26 +580,39 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("You own 0 Accounts!")
         return
 
-    # --- Helper to send chunks with Explicit Entities ---
     async def send_entity_chunks(header, account_list, detailed=False):
         """
-        Builds messages using explicit MessageEntity objects.
+        Builds messages using explicit MessageEntity objects with UTF-16 offset calculation.
         """
-        current_text = header
+        def get_utf16_len(s):
+            return len(s.encode('utf-16-le')) // 2
+
+        # Initialize state
+        current_text = ""
         current_entities = []
-        # Header has no entities usually, but if it did, we'd add them here.
-        # For simplicity, we assume header is bold HTML which PTB parses if we used parse_mode,
-        # BUT we are switching to manual entities.
-        # So we will replicate Bold for the header manually.
+        current_utf16_len = 0
         
-        # Add Bold Entity for header if needed
-        if header.strip():
-            current_entities.append(MessageEntity(type=MessageEntity.BOLD, offset=0, length=len(header)))
-            current_text += "\n" # Spacing
+        # Add Header if present
+        if header:
+            h_len = get_utf16_len(header)
+            # Add Bold Entity
+            current_entities.append(MessageEntity(type=MessageEntity.BOLD, offset=0, length=h_len))
+            
+            current_text += header
+            current_utf16_len += h_len
+            
+            # Add Newline
+            current_text += "\n"
+            current_utf16_len += get_utf16_len("\n")
 
         count = 0
         
         for acc in account_list:
+            # Build the line for this account strictly first
+            line_text = ""
+            line_entities = [] # Stores tuple: (type, relative_offset, length, url)
+            line_utf16_len = 0
+            
             user_id = acc.get('user_id')
             unique_name = acc.get('unique_name')
             first_name = acc.get('first_name')
@@ -614,92 +627,115 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif first_name: display_name = first_name
             elif user_id: display_name = f"ID: {user_id}"
             
-            # --- Build the Line Text ---
-            # We construct the line step-by-step to calculate offsets
-            
             if detailed:
-                # DETAILED VIEW CONSTRUCTION
-                # Line 1: [Link Name] (UniqueName)
-                start_offset = len(current_text)
-                current_text += display_name
-                length_name = len(display_name)
-                
-                # Add Link Entity
+                # --- DETAILED VIEW ---
+                # Line 1: Name [Link] (Unique)
+                name_len = get_utf16_len(display_name)
                 if user_id:
-                     current_entities.append(MessageEntity(
-                         type=MessageEntity.TEXT_LINK, 
-                         offset=start_offset, 
-                         length=length_name, 
-                         url=f"tg://user?id={user_id}"
-                     ))
+                    line_entities.append((MessageEntity.TEXT_LINK, line_utf16_len, name_len, f"tg://user?id={user_id}"))
+                
+                line_text += display_name
+                line_utf16_len += name_len
                 
                 if unique_name and unique_name != display_name:
-                    current_text += f" ({unique_name})"
+                    extra = f" ({unique_name})"
+                    line_text += extra
+                    line_utf16_len += get_utf16_len(extra)
                 
-                current_text += "\n"
+                line_text += "\n"
+                line_utf16_len += get_utf16_len("\n")
                 
-                # Line 2: User: @username
-                if username_str:
-                    current_text += f"User: @{username_str}\n"
-                else:
-                    current_text += "User: N/A\n"
-                    
-                # Line 3: Phone: +12345
-                current_text += f"Phone: +{phone if phone else 'N/A'}\n"
+                # Line 2: User
+                user_line = f"User: @{username_str}\n" if username_str else "User: N/A\n"
+                line_text += user_line
+                line_utf16_len += get_utf16_len(user_line)
                 
-                # Line 4: Device (Interval)
-                interval_str = f"{interval}m"
-                current_text += f"{device_model} ({interval_str})\n"
+                # Line 3: Phone
+                p_text = f"+{phone}" if phone else "N/A"
+                full_p_line = f"Phone: {p_text}\n"
                 
-                # Line 5: ID
-                current_text += f"ID: {user_id}\n"
-                current_text += f"{'-'*25}\n"
+                # Code entity for phone number part
+                pre_phone_len = get_utf16_len("Phone: ")
+                p_val_len = get_utf16_len(p_text)
                 
-            else:
-                # CONCISE VIEW CONSTRUCTION
-                # 👉 [Link Name]: +12345 (⌚ 1440m)
-                current_text += "👉 "
+                line_entities.append((MessageEntity.CODE, line_utf16_len + pre_phone_len, p_val_len, None))
                 
-                start_offset = len(current_text)
-                current_text += display_name
-                length_name = len(display_name)
+                line_text += full_p_line
+                line_utf16_len += get_utf16_len(full_p_line)
                 
-                # Add Link Entity
-                if user_id:
-                     current_entities.append(MessageEntity(
-                         type=MessageEntity.TEXT_LINK, 
-                         offset=start_offset, 
-                         length=length_name, 
-                         url=f"tg://user?id={user_id}"
-                     ))
+                # Line 4: Device
+                dev_line = f"{device_model} ({interval}m)\n"
+                line_text += dev_line
+                line_utf16_len += get_utf16_len(dev_line)
                 
-                current_text += ": "
-                
-                # Phone (Monospace)
-                phone_txt = f"+{phone}" if phone else "No Phone"
-                phone_start = len(current_text)
-                current_text += phone_txt
-                current_entities.append(MessageEntity(type=MessageEntity.CODE, offset=phone_start, length=len(phone_txt)))
-                
-                if interval != '1440':
-                    current_text += f" (⌚ {interval}m)"
-                    
-                current_text += "\n"
+                # Line 5: ID + Separator
+                id_line = f"ID: {user_id}\n{'-'*25}\n"
+                line_text += id_line
+                line_utf16_len += get_utf16_len(id_line)
 
-            count += 1
-            
-            # Check Limits
-            if len(current_text) > 4000 or count >= 50:
+            else:
+                # --- CONCISE VIEW ---
+                # "👉 "
+                prefix = "👉 "
+                line_text += prefix
+                line_utf16_len += get_utf16_len(prefix)
+                
+                # Name [Link]
+                name_len = get_utf16_len(display_name)
+                if user_id:
+                    line_entities.append((MessageEntity.TEXT_LINK, line_utf16_len, name_len, f"tg://user?id={user_id}"))
+                
+                line_text += display_name
+                line_utf16_len += name_len
+                
+                # ": "
+                sep = ": "
+                line_text += sep
+                line_utf16_len += get_utf16_len(sep)
+                
+                # Phone [Code]
+                p_text = f"+{phone}" if phone else "No Phone"
+                p_len = get_utf16_len(p_text)
+                line_entities.append((MessageEntity.CODE, line_utf16_len, p_len, None))
+                
+                line_text += p_text
+                line_utf16_len += p_len
+                
+                # Interval
+                if interval != '1440':
+                    i_text = f" (⌚ {interval}m)"
+                    line_text += i_text
+                    line_utf16_len += get_utf16_len(i_text)
+                
+                line_text += "\n"
+                line_utf16_len += get_utf16_len("\n")
+
+            # --- FLUSH CHECK ---
+            # Check if adding this line exceeds limit (4096 chars safely, say 4000)
+            # OR if count exceeds 50
+            if (current_utf16_len + line_utf16_len > 4000) or (count >= 50):
+                # Send current chunk
                 await update.message.reply_text(text=current_text, entities=current_entities, disable_web_page_preview=True)
+                
                 # Reset
                 current_text = ""
                 current_entities = []
+                current_utf16_len = 0
                 count = 0
-
-        # Send remainder
+            
+            # --- APPEND LINE ---
+            # Add entities adjusted by current offset
+            for etype, rel_off, elen, eurl in line_entities:
+                abs_offset = current_utf16_len + rel_off
+                current_entities.append(MessageEntity(type=etype, offset=abs_offset, length=elen, url=eurl))
+            
+            current_text += line_text
+            current_utf16_len += line_utf16_len
+            count += 1
+            
+        # Send remaining
         if current_text:
-             await update.message.reply_text(text=current_text, entities=current_entities, disable_web_page_preview=True)
-    # -----------------------------
+            await update.message.reply_text(text=current_text, entities=current_entities, disable_web_page_preview=True)
 
     if context.args and context.args[0] == "-de":
         header_text = "👤 Your Managed Accounts (Detailed):"
