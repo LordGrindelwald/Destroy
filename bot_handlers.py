@@ -177,19 +177,29 @@ async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Force Syncs ALL accounts. 
-    It iterates every account in the DB, connects to Telegram, retrieves the 
-    REAL user_id and first_name, and updates the database.
-    This fixes broken mentions caused by incorrect/stale cached IDs.
+    1. Verifies IDs are correct.
+    2. Forces the userbot to message the Management Bot (/start) to enable clickable mentions.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
+        
+    # Ensure we have the bot username to send /start to
+    bot_username = context.bot.username
+    if not bot_username:
+        me_bot = await context.bot.get_me()
+        bot_username = me_bot.username
 
     # Fetch ALL accounts
     all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
     total_count = len(all_accounts)
     
-    status_msg = await update.message.reply_text(f"🔄 <b>Force Sync Started</b>\n\nScanning {total_count} accounts.\nThis will connect to each account to fetch the real ID.", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text(
+        f"🔄 <b>Fixing Mentions...</b>\n\n"
+        f"Scanning {total_count} accounts.\n"
+        f"Making each account say 'Hi' to @{bot_username} so mentions become clickable.", 
+        parse_mode=ParseMode.HTML
+    )
 
     fixed_count = 0
     updated_count = 0
@@ -203,7 +213,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Update progress every 5 accounts
         if index % 5 == 0:
-            await status_msg.edit_text(f"🔄 <b>Syncing Accounts...</b>\nProgress: {index}/{total_count}\nUpdated: {updated_count}\nFailed: {failed_count}", parse_mode=ParseMode.HTML)
+            await status_msg.edit_text(
+                f"🔄 <b>Fixing Mentions...</b>\n"
+                f"Progress: {index}/{total_count}\n"
+                f"Registered: {fixed_count}\n"
+                f"Failed: {failed_count}", 
+                parse_mode=ParseMode.HTML
+            )
 
         try:
             # 1. Decrypt session
@@ -217,7 +233,7 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 2. Connect
             temp_client = Client(
-                name=f"sync_{doc_id}",
+                name=f"fixlink_{doc_id}",
                 api_id=TD_API_ID,
                 api_hash=TD_API_HASH,
                 session_string=session,
@@ -232,11 +248,23 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             await temp_client.connect()
+            
+            # --- CRITICAL FIX: Make userbot known to the bot ---
+            try:
+                # Send /start to the management bot
+                await temp_client.send_message(bot_username, "/start")
+                # Wait briefly to ensure delivery
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Failed to send start message from {name}: {e}")
+            # ---------------------------------------------------
+            
             me = await temp_client.get_me()
             real_id = me.id
             real_first_name = me.first_name or ""
             real_username = me.username or None
             real_phone = me.phone_number or acc.get('phone_number')
+            
             await temp_client.disconnect()
 
             # 3. Check for differences and Update DB
@@ -245,7 +273,6 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
             
-            # Also sync names to ensure display is correct
             if acc.get("first_name") != real_first_name:
                 updates["first_name"] = real_first_name
             
@@ -267,19 +294,17 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             failed_count += 1
-            # log_lines.append(f"⚠️ {name} failed: {e}") # Reduce spam in logs
-            logger.error(f"Sync failed for {name}: {e}")
+            logger.error(f"Fix failed for {name}: {e}")
+            # Don't flood the user log with connection errors unless critical
 
     final_text = (
-        f"✅ <b>Sync Complete</b>\n"
+        f"✅ <b>Mention Repair Complete</b>\n"
         f"Total Scanned: {total_count}\n"
-        f"Updates Applied: {updated_count}\n"
-        f"Failed to Connect: {failed_count}\n\n" +
-        "\n".join(log_lines[:10]) # Only show first 10 significant logs
+        f"Handshakes Sent: {fixed_count}\n"
+        f"DB Updates: {updated_count}\n\n" +
+        "\n".join(log_lines[:10])
     )
-    if len(log_lines) > 10:
-        final_text += f"\n...and {len(log_lines)-10} more changes."
-
+    
     await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
 
 
@@ -2429,19 +2454,29 @@ two_fa_conv = ConversationHandler(
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Force Syncs ALL accounts. 
-    It iterates every account in the DB, connects to Telegram, retrieves the 
-    REAL user_id and first_name, and updates the database.
-    This fixes broken mentions caused by incorrect/stale cached IDs.
+    1. Verifies IDs are correct.
+    2. Forces the userbot to message the Management Bot (/start) to enable clickable mentions.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
+        
+    # Ensure we have the bot username to send /start to
+    bot_username = context.bot.username
+    if not bot_username:
+        me_bot = await context.bot.get_me()
+        bot_username = me_bot.username
 
     # Fetch ALL accounts
     all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
     total_count = len(all_accounts)
     
-    status_msg = await update.message.reply_text(f"🔄 <b>Force Sync Started</b>\n\nScanning {total_count} accounts.\nThis will connect to each account to fetch the real ID.", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text(
+        f"🔄 <b>Fixing Mentions...</b>\n\n"
+        f"Scanning {total_count} accounts.\n"
+        f"Making each account say 'Hi' to @{bot_username} so mentions become clickable.", 
+        parse_mode=ParseMode.HTML
+    )
 
     fixed_count = 0
     updated_count = 0
@@ -2455,7 +2490,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Update progress every 5 accounts
         if index % 5 == 0:
-            await status_msg.edit_text(f"🔄 <b>Syncing Accounts...</b>\nProgress: {index}/{total_count}\nUpdated: {updated_count}\nFailed: {failed_count}", parse_mode=ParseMode.HTML)
+            await status_msg.edit_text(
+                f"🔄 <b>Fixing Mentions...</b>\n"
+                f"Progress: {index}/{total_count}\n"
+                f"Registered: {fixed_count}\n"
+                f"Failed: {failed_count}", 
+                parse_mode=ParseMode.HTML
+            )
 
         try:
             # 1. Decrypt session
@@ -2469,7 +2510,7 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 2. Connect
             temp_client = Client(
-                name=f"sync_{doc_id}",
+                name=f"fixlink_{doc_id}",
                 api_id=TD_API_ID,
                 api_hash=TD_API_HASH,
                 session_string=session,
@@ -2484,11 +2525,23 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             await temp_client.connect()
+            
+            # --- CRITICAL FIX: Make userbot known to the bot ---
+            try:
+                # Send /start to the management bot
+                await temp_client.send_message(bot_username, "/start")
+                # Wait briefly to ensure delivery
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Failed to send start message from {name}: {e}")
+            # ---------------------------------------------------
+            
             me = await temp_client.get_me()
             real_id = me.id
             real_first_name = me.first_name or ""
             real_username = me.username or None
             real_phone = me.phone_number or acc.get('phone_number')
+            
             await temp_client.disconnect()
 
             # 3. Check for differences and Update DB
@@ -2497,7 +2550,6 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
             
-            # Also sync names to ensure display is correct
             if acc.get("first_name") != real_first_name:
                 updates["first_name"] = real_first_name
             
@@ -2519,17 +2571,15 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             failed_count += 1
-            # log_lines.append(f"⚠️ {name} failed: {e}") # Reduce spam in logs
-            logger.error(f"Sync failed for {name}: {e}")
+            logger.error(f"Fix failed for {name}: {e}")
+            # Don't flood the user log with connection errors unless critical
 
     final_text = (
-        f"✅ <b>Sync Complete</b>\n"
+        f"✅ <b>Mention Repair Complete</b>\n"
         f"Total Scanned: {total_count}\n"
-        f"Updates Applied: {updated_count}\n"
-        f"Failed to Connect: {failed_count}\n\n" +
-        "\n".join(log_lines[:10]) # Only show first 10 significant logs
+        f"Handshakes Sent: {fixed_count}\n"
+        f"DB Updates: {updated_count}\n\n" +
+        "\n".join(log_lines[:10])
     )
-    if len(log_lines) > 10:
-        final_text += f"\n...and {len(log_lines)-10} more changes."
-
+    
     await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
