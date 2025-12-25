@@ -564,9 +564,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles /accs command.
-    /accs (default): Shows concise list.
-    /accs -de: Shows detailed list.
-    **CHUNKED**: Splits message if >4096 chars OR >50 accounts.
+    REWRITTEN: Uses Explicit Entities (MessageEntity.TEXT_LINK) instead of HTML.
+    This fixes issues where specific account names/IDs fail to render as links.
     """
     if accounts_collection is None:
         await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
@@ -581,120 +580,133 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("You own 0 Accounts!")
         return
 
-    # --- Helper to send chunks with Account Limit ---
-    async def send_smart_chunks(header, items):
+    # --- Helper to send chunks with Explicit Entities ---
+    async def send_entity_chunks(header, account_list, detailed=False):
         """
-        Sends a list of items in chunks.
-        Splits if:
-        1. Character count exceeds 4000 (Telegram limit is 4096).
-        2. Item count exceeds 50 (User preference).
+        Builds messages using explicit MessageEntity objects.
         """
-        current_chunk = header
-        current_count = 0 # Track number of items in current chunk
+        current_text = header
+        current_entities = []
+        # Header has no entities usually, but if it did, we'd add them here.
+        # For simplicity, we assume header is bold HTML which PTB parses if we used parse_mode,
+        # BUT we are switching to manual entities.
+        # So we will replicate Bold for the header manually.
         
-        for item in items:
-            # Check limits: Char limit (safe buffer 4000) OR Item count limit (50)
-            if (len(current_chunk) + len(item) + 1 > 4000) or (current_count >= 50):
-                # Send the accumulated chunk
-                await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+        # Add Bold Entity for header if needed
+        if header.strip():
+            current_entities.append(MessageEntity(type=MessageEntity.BOLD, offset=0, length=len(header)))
+            current_text += "\n" # Spacing
+
+        count = 0
+        
+        for acc in account_list:
+            user_id = acc.get('user_id')
+            unique_name = acc.get('unique_name')
+            first_name = acc.get('first_name')
+            phone = acc.get('phone_number')
+            interval = acc.get('online_interval', '1440')
+            device_model = acc.get('device_model', 'N/A')
+            username_str = acc.get('username')
+
+            # Determine Display Name
+            display_name = "N/A"
+            if unique_name: display_name = unique_name
+            elif first_name: display_name = first_name
+            elif user_id: display_name = f"ID: {user_id}"
+            
+            # --- Build the Line Text ---
+            # We construct the line step-by-step to calculate offsets
+            
+            if detailed:
+                # DETAILED VIEW CONSTRUCTION
+                # Line 1: [Link Name] (UniqueName)
+                start_offset = len(current_text)
+                current_text += display_name
+                length_name = len(display_name)
                 
-                # Start new chunk with the current item
-                current_chunk = item
-                current_count = 1
-            else:
-                # Add newline only if it's not the very first line (header logic handled by init)
-                if current_count == 0 and current_chunk == "":
-                     current_chunk = item
+                # Add Link Entity
+                if user_id:
+                     current_entities.append(MessageEntity(
+                         type=MessageEntity.TEXT_LINK, 
+                         offset=start_offset, 
+                         length=length_name, 
+                         url=f"tg://user?id={user_id}"
+                     ))
+                
+                if unique_name and unique_name != display_name:
+                    current_text += f" ({unique_name})"
+                
+                current_text += "\n"
+                
+                # Line 2: User: @username
+                if username_str:
+                    current_text += f"User: @{username_str}\n"
                 else:
-                     current_chunk += "\n" + item
-                current_count += 1
+                    current_text += "User: N/A\n"
+                    
+                # Line 3: Phone: +12345
+                current_text += f"Phone: +{phone if phone else 'N/A'}\n"
                 
-        # Send remaining chunk
-        if current_chunk:
-            await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+                # Line 4: Device (Interval)
+                interval_str = f"{interval}m"
+                current_text += f"{device_model} ({interval_str})\n"
+                
+                # Line 5: ID
+                current_text += f"ID: {user_id}\n"
+                current_text += f"{'-'*25}\n"
+                
+            else:
+                # CONCISE VIEW CONSTRUCTION
+                # 👉 [Link Name]: +12345 (⌚ 1440m)
+                current_text += "👉 "
+                
+                start_offset = len(current_text)
+                current_text += display_name
+                length_name = len(display_name)
+                
+                # Add Link Entity
+                if user_id:
+                     current_entities.append(MessageEntity(
+                         type=MessageEntity.TEXT_LINK, 
+                         offset=start_offset, 
+                         length=length_name, 
+                         url=f"tg://user?id={user_id}"
+                     ))
+                
+                current_text += ": "
+                
+                # Phone (Monospace)
+                phone_txt = f"+{phone}" if phone else "No Phone"
+                phone_start = len(current_text)
+                current_text += phone_txt
+                current_entities.append(MessageEntity(type=MessageEntity.CODE, offset=phone_start, length=len(phone_txt)))
+                
+                if interval != '1440':
+                    current_text += f" (⌚ {interval}m)"
+                    
+                current_text += "\n"
+
+            count += 1
+            
+            # Check Limits
+            if len(current_text) > 4000 or count >= 50:
+                await update.message.reply_text(text=current_text, entities=current_entities, disable_web_page_preview=True)
+                # Reset
+                current_text = ""
+                current_entities = []
+                count = 0
+
+        # Send remainder
+        if current_text:
+             await update.message.reply_text(text=current_text, entities=current_entities, disable_web_page_preview=True)
     # -----------------------------
 
-    # --- DETAILED VIEW ---
     if context.args and context.args[0] == "-de":
-        header_text = "👤 <b>Your Managed Accounts (Detailed):</b>\n"
-        items = []
-
-        for acc in accounts:
-            user_id = acc.get('user_id')
-            raw_first_name = acc.get('first_name')
-            raw_unique_name = acc.get('unique_name')
-            raw_username = acc.get('username')
-            raw_phone = acc.get('phone_number') 
-            online_interval = acc.get('online_interval', '1440') 
-
-            first_name = escape_html(raw_first_name) if raw_first_name else None
-            unique_name = escape_html(raw_unique_name) if raw_unique_name else None
-            username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
-            phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
-            device_model = acc.get('device_model', 'N/A')
-            
-            # --- FIX: Ensure user_id is int for valid link ---
-            try:
-                safe_user_id = int(user_id) if user_id else None
-            except (ValueError, TypeError):
-                safe_user_id = None
-
-            link_text_content = first_name or (f"ID: {user_id}" if user_id else "Unknown")
-            mention_link = f"<a href=\"tg://user?id={safe_user_id}\">{link_text_content}</a>" if safe_user_id else link_text_content
-            
-            name_display = mention_link
-            if unique_name:
-                name_display += f" ({unique_name})"
-
-            entry_text = (
-                f"{name_display}\n"
-                f"<b>User:</b> {username_str}\n"
-                f"<b>Phone:</b> <code>{phone_str}</code>\n"
-                f"{escape_html(device_model)}"
-                f" ({escape_html(online_interval)} min)\n" 
-                f"<b>ID:</b> {user_id if user_id else 'N/A'}"
-            )
-            # Add separator for readability
-            items.append(entry_text + f"\n{'-'*25}")
-        
-        await send_smart_chunks(header_text, items)
-        return
-
-    # --- CONCISE VIEW (Default) ---
-    header_text = f"You own {len(accounts)} Accounts!\n"
-    items = []
-    
-    for acc in accounts:
-        user_id = acc.get('user_id')
-        unique_name = acc.get('unique_name')
-        first_name = acc.get('first_name')
-        
-        # Determine display name and link
-        display_name = "N/A"
-        if unique_name:
-            display_name = escape_html(unique_name)
-        elif first_name:
-            display_name = escape_html(first_name)
-        elif user_id:
-            display_name = f"ID: {user_id}"
-            
-        # --- FIX: Ensure user_id is int for valid link ---
-        try:
-            safe_user_id = int(user_id) if user_id else None
-        except (ValueError, TypeError):
-            safe_user_id = None
-
-        mention = f"<a href=\"tg://user?id={safe_user_id}\">{display_name}</a>" if safe_user_id else display_name
-        
-        phone = acc.get('phone_number')
-        phone_str = f"+<code>{escape_html(phone)}</code>" if phone else "No Phone"
-        
-        interval = acc.get('online_interval', '1440')
-        interval_str = f" (⌚ {interval}m)" if interval != '1440' else ""
-        
-        items.append(f"👉 {mention}: {phone_str}{interval_str}")
-
-    await send_smart_chunks(header_text, items)
+        header_text = "👤 Your Managed Accounts (Detailed):"
+        await send_entity_chunks(header_text, accounts, detailed=True)
+    else:
+        header_text = f"You own {len(accounts)} Accounts!"
+        await send_entity_chunks(header_text, accounts, detailed=False)
 
 
 @owner_only
