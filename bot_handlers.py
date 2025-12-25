@@ -46,7 +46,7 @@ from session_generator import generate_command
 # --- Constants ---
 ACCOUNTS_PER_PAGE = 16 
 
-# --- NEW COMMANDS: Backup & Restore & Encryption ---
+# --- NEW COMMANDS: Backup & Restore & Encryption & Fixes ---
 
 @owner_only
 async def debug_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,23 +192,28 @@ async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYP
 @owner_only
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Force Syncs ALL accounts and ensures IDs are integers.
+    Force Syncs ALL accounts. 
+    1. Verifies IDs are correct.
+    2. Forces the userbot to message the Management Bot (/start) to enable clickable mentions.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
         
+    # Ensure we have the bot username to send /start to
     bot_username = context.bot.username
     if not bot_username:
         me_bot = await context.bot.get_me()
         bot_username = me_bot.username
 
+    # Fetch ALL accounts
     all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
     total_count = len(all_accounts)
     
     status_msg = await update.message.reply_text(
-        f"🔄 <b>Database Repair</b>\n\n"
-        f"Scanning {total_count} accounts...", 
+        f"🔄 <b>Fixing Mentions...</b>\n\n"
+        f"Scanning {total_count} accounts.\n"
+        f"Making each account say 'Hi' to @{bot_username} so mentions become clickable.", 
         parse_mode=ParseMode.HTML
     )
 
@@ -222,22 +227,27 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc_id = acc['_id']
         old_id = acc.get('user_id')
         
+        # Update progress every 5 accounts
         if index % 5 == 0:
             await status_msg.edit_text(
-                f"🔄 <b>Database Repair</b>\n"
+                f"🔄 <b>Fixing Mentions...</b>\n"
                 f"Progress: {index}/{total_count}\n"
-                f"Fixed: {updated_count}\n", 
+                f"Registered: {fixed_count}\n"
+                f"Failed: {failed_count}", 
                 parse_mode=ParseMode.HTML
             )
 
         try:
+            # 1. Decrypt session
             raw_session = acc.get("session_string")
             if not raw_session:
+                log_lines.append(f"❌ {name}: No session string.")
                 failed_count += 1
                 continue
                 
             session = decrypt_text(raw_session)
             
+            # 2. Connect
             temp_client = Client(
                 name=f"fixlink_{doc_id}",
                 api_id=TD_API_ID,
@@ -255,23 +265,26 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await temp_client.connect()
             
-            # Send /start to ensure visibility
+            # --- CRITICAL FIX: Make userbot known to the bot ---
             try:
+                # Send /start to the management bot
                 await temp_client.send_message(bot_username, "/start")
+                # Wait briefly to ensure delivery
                 await asyncio.sleep(0.5)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to send start message from {name}: {e}")
+            # ---------------------------------------------------
             
             me = await temp_client.get_me()
-            real_id = int(me.id) # Force Int
+            real_id = me.id
             real_first_name = me.first_name or ""
             real_username = me.username or None
             real_phone = me.phone_number or acc.get('phone_number')
             
             await temp_client.disconnect()
 
+            # 3. Check for differences and Update DB
             updates = {}
-            # Strict Int Check
             if old_id != real_id:
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
@@ -298,11 +311,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             failed_count += 1
             logger.error(f"Fix failed for {name}: {e}")
+            # Don't flood the user log with connection errors unless critical
 
     final_text = (
-        f"✅ <b>Repair Complete</b>\n"
-        f"Scanned: {total_count}\n"
-        f"Updates: {updated_count}\n\n" +
+        f"✅ <b>Mention Repair Complete</b>\n"
+        f"Total Scanned: {total_count}\n"
+        f"Handshakes Sent: {fixed_count}\n"
+        f"DB Updates: {updated_count}\n\n" +
         "\n".join(log_lines[:10])
     )
     
@@ -502,7 +517,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Uses SAFE HTML with Strict Integer ID enforcement to fix links.
     """
     if accounts_collection is None:
-        await update.message.reply_html("⚠️ Database connection error.")
+        await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
         return
         
     accounts = await asyncio.to_thread(
@@ -1133,7 +1148,227 @@ async def update_2fa_password_command(update: Update, context: ContextTypes.DEFA
     await asyncio.to_thread(accounts_collection.update_one, {"_id": acc["_id"]}, {"$set": {"two_fa_password": context.args[1]}})
     await update.message.reply_text("Updated.")
 
-# (Simplified 2FA Conv for brevity - re-using structures from other convs)
+# --- RE-ADDED MISSING 2FA FUNCTIONS TO FIX NAMEERROR ---
+
+@owner_only
+async def two_fa_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("Select Accounts for 2FA 🔐", callback_data="2fa_start_selection")]]
+    await update.message.reply_html("<b>2FA Configuration Manager</b>", reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAIT_BUTTON_2FA
+
+@owner_only
+async def two_fa_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if accounts_collection is None:
+        await query.edit_message_text("⚠️ DB Error.")
+        return ConversationHandler.END
+    all_accs = await asyncio.to_thread(lambda: list(accounts_collection.find({}, {"user_id": 1})))
+    if not all_accs:
+        await query.edit_message_text("No accounts.")
+        return ConversationHandler.END
+    context.user_data.clear()
+    context.user_data['all_account_ids'] = [a['user_id'] for a in all_accs]
+    context.user_data['selected_accounts'] = set()
+    context.user_data['current_page'] = 0
+    await draw_account_selection_menu_2fa(query, context)
+    return SELECT_ACCOUNTS_2FA
+
+async def draw_account_selection_menu_2fa(query_obj, context):
+    query = query_obj if isinstance(query_obj, CallbackQueryHandler) else query_obj.callback_query or query_obj
+    all_ids = context.user_data.get('all_account_ids', [])
+    selected = context.user_data.get('selected_accounts', set())
+    page = context.user_data.get('current_page', 0)
+    
+    total = len(all_ids)
+    pages = math.ceil(total / ACCOUNTS_PER_PAGE)
+    page_ids = all_ids[page*ACCOUNTS_PER_PAGE:(page+1)*ACCOUNTS_PER_PAGE]
+    
+    page_accs = await asyncio.to_thread(lambda: list(accounts_collection.find({"user_id": {"$in": page_ids}}, {"first_name": 1, "user_id": 1, "unique_name": 1})))
+    acc_map = {a['user_id']: a for a in page_accs}
+    
+    keyboard = []
+    keyboard.append([InlineKeyboardButton("Select All", callback_data="2fa_select_all"), InlineKeyboardButton("Unselect All", callback_data="2fa_unselect_all")])
+    
+    btns = []
+    for uid in page_ids:
+        if uid in acc_map:
+            name = escape_html(acc_map[uid].get('unique_name') or str(uid))
+            prefix = "✅" if uid in selected else "🔐"
+            btns.append(InlineKeyboardButton(f"{prefix} {name}", callback_data=f"2fa_toggle_{uid}"))
+    for i in range(0, len(btns), 2): keyboard.append(btns[i:i+2])
+    
+    keyboard.append([InlineKeyboardButton("Done 👌", callback_data="2fa_done_select")])
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data="2fa_prev_page"))
+    if page < pages-1: nav.append(InlineKeyboardButton("➡️", callback_data="2fa_next_page"))
+    keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_2fa_conv")])
+    
+    try: await query.edit_message_text(f"<b>Select for 2FA</b>\nSelected: {len(selected)}", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    except: pass
+
+@owner_only
+async def handle_account_selection_callback_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    selected = context.user_data.get('selected_accounts', set())
+    all_ids = context.user_data.get('all_account_ids', [])
+    
+    if data == "2fa_done_select":
+        if not selected:
+            await query.answer("Select one.", show_alert=True)
+            return SELECT_ACCOUNTS_2FA
+        if len(selected) > 1:
+            await query.edit_message_text("Send delay (seconds).")
+            return AWAIT_DELAY_2FA
+        else:
+            context.user_data['2fa_delay'] = 0
+            await query.edit_message_text("Send NEW password (or #empty#).")
+            return AWAIT_PASSWORD_2FA
+            
+    if data.startswith("2fa_toggle_"):
+        uid = int(data.split("_")[2])
+        if uid in selected: selected.discard(uid)
+        else: selected.add(uid)
+    elif data == "2fa_select_all": selected.update(all_ids)
+    elif data == "2fa_unselect_all": selected.clear()
+    elif data == "2fa_next_page": context.user_data['current_page'] += 1
+    elif data == "2fa_prev_page": context.user_data['current_page'] -= 1
+    
+    context.user_data['selected_accounts'] = selected
+    await draw_account_selection_menu_2fa(query, context)
+    return SELECT_ACCOUNTS_2FA
+
+@owner_only
+async def handle_2fa_delay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        delay = int(update.message.text.strip())
+    except: delay = 5
+    context.user_data['2fa_delay'] = delay
+    await update.message.reply_text("Send NEW password (or #empty#).")
+    return AWAIT_PASSWORD_2FA
+
+@owner_only
+async def handle_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['new_2fa_password'] = update.message.text.strip()
+    await update.message.reply_text("Send NEW hint (or #empty#).")
+    return AWAIT_HINT_2FA
+
+@owner_only
+async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['new_2fa_hint'] = update.message.text.strip()
+    context.user_data['pending_2fa_ids'] = list(context.user_data.get('selected_accounts', []))
+    context.user_data['2fa_results'] = []
+    context.user_data['current_2fa_user_id'] = None
+    
+    await update.message.reply_text("🚀 Starting 2FA update...")
+    return await process_2fa_queue(update, context)
+
+async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    results = context.user_data.get('2fa_results', [])
+    delay = context.user_data.get('2fa_delay', 5)
+    new_pwd = context.user_data.get('new_2fa_password')
+    hint = context.user_data.get('new_2fa_hint')
+    
+    disable_mode = (new_pwd == "#empty#")
+    target_pwd = new_pwd if not disable_mode else None
+    target_hint = hint if hint != "#empty#" else None
+    
+    while True:
+        pending = context.user_data.get('pending_2fa_ids', [])
+        retry_id = context.user_data.get('current_2fa_user_id')
+        
+        if not pending and not retry_id: break
+        
+        if retry_id:
+            uid = retry_id
+        else:
+            uid = pending.pop(0)
+            if results and delay > 0: await asyncio.sleep(delay)
+            
+        acc_name = f"ID: {uid}"
+        if uid not in active_userbots:
+            results.append(f"❌ {acc_name}: OFFLINE.")
+            context.user_data['current_2fa_user_id'] = None
+            continue
+            
+        client = active_userbots[uid]
+        if client.me: acc_name = escape_html(client.me.first_name)
+        
+        acc_doc = await asyncio.to_thread(accounts_collection.find_one, {"user_id": uid})
+        cur_db_pwd = acc_doc.get("two_fa_password") if acc_doc else None
+        
+        try:
+            if disable_mode:
+                if cur_db_pwd:
+                    await client.disable_cloud_password(password=cur_db_pwd)
+                    results.append(f"✅ {acc_name}: Disabled.")
+                else:
+                    try:
+                        await client.disable_cloud_password()
+                        results.append(f"✅ {acc_name}: Disabled (No pwd).")
+                    except (PasswordHashInvalid, BadRequest):
+                        context.user_data['current_2fa_user_id'] = uid
+                        await update.message.reply_text(f"🔐 Need CURRENT password for {acc_name}. Send it or /skip.")
+                        return AWAIT_CURRENT_2FA_PASSWORD
+            else:
+                if cur_db_pwd:
+                    await client.change_cloud_password(current_password=cur_db_pwd, new_password=target_pwd, new_hint=target_hint)
+                    results.append(f"✅ {acc_name}: Changed.")
+                else:
+                    try:
+                        await client.enable_cloud_password(password=target_pwd, hint=target_hint)
+                        results.append(f"✅ {acc_name}: Enabled.")
+                    except (BadRequest, Exception) as ie:
+                        if "PASSWORD_ALREADY_ENABLED" in str(ie) or "cloud password" in str(ie).lower():
+                            context.user_data['current_2fa_user_id'] = uid
+                            await update.message.reply_text(f"🔐 Need CURRENT password for {acc_name}. Send it or /skip.")
+                            return AWAIT_CURRENT_2FA_PASSWORD
+                        raise ie
+                        
+            final_pwd = target_pwd if not disable_mode else None
+            await asyncio.to_thread(accounts_collection.update_one, {"user_id": uid}, {"$set": {"two_fa_password": final_pwd}})
+            context.user_data['current_2fa_user_id'] = None
+            
+        except PasswordHashInvalid:
+            context.user_data['current_2fa_user_id'] = uid
+            await update.message.reply_text(f"🔐 Wrong password for {acc_name}. Send CORRECT one or /skip.")
+            return AWAIT_CURRENT_2FA_PASSWORD
+        except Exception as e:
+            results.append(f"⚠️ {acc_name}: {e}")
+            context.user_data['current_2fa_user_id'] = None
+            
+    await update.message.reply_html("<b>Done.</b>\n" + "\n".join(results))
+    return ConversationHandler.END
+
+@owner_only
+async def handle_current_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pwd = update.message.text.strip()
+    uid = context.user_data.get('current_2fa_user_id')
+    if not uid: return ConversationHandler.END
+    
+    await asyncio.to_thread(accounts_collection.update_one, {"user_id": uid}, {"$set": {"two_fa_password": pwd}})
+    await update.message.reply_text("Saved. Retrying...")
+    return await process_2fa_queue(update, context)
+
+@owner_only
+async def skip_current_2fa_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = context.user_data.get('current_2fa_user_id')
+    if uid:
+        context.user_data.get('2fa_results', []).append(f"⏩ ID {uid}: Skipped.")
+        context.user_data['current_2fa_user_id'] = None
+    await update.message.reply_text("Skipped.")
+    return await process_2fa_queue(update, context)
+
+@owner_only
+async def cancel_2fa_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    if update.callback_query: await update.callback_query.edit_message_text("Cancelled.")
+    else: await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
 two_fa_conv = ConversationHandler(
     entry_points=[CommandHandler("2fas", two_fa_start)],
     states={
