@@ -91,29 +91,28 @@ async def debug_account_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Force Syncs ALL accounts. 
-    1. Decrypts session and connects to Telegram.
-    2. Sends '/start' to the Management Bot (Handshake) to enable mentions.
-    3. Updates user_id, first_name, username, and phone in DB.
+    1. Uses temporary FILE SESSIONS (fixes 'no such table' error).
+    2. Sends '/start' to the Bot ID (fixes name resolution error).
+    3. Management Bot caches the User ID (fixes unclickable links).
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
         
-    # Ensure we have the bot username to send /start to
-    bot_username = context.bot.username
-    if not bot_username:
+    bot_id = context.bot.id
+    if not bot_id:
         me_bot = await context.bot.get_me()
-        bot_username = me_bot.username
+        bot_id = me_bot.id
 
     # Fetch ALL accounts
     all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
     total_count = len(all_accounts)
     
     status_msg = await update.message.reply_text(
-        f"🔄 <b>Starting Deep Repair...</b>\n\n"
+        f"🔄 <b>Starting Deep Repair (File Mode)...</b>\n\n"
         f"Target: {total_count} accounts.\n"
-        f"Action: Connect -> Handshake with @{bot_username} -> Update DB.\n"
-        f"<i>This may take a while.</i>", 
+        f"Target Bot ID: {bot_id}\n"
+        f"<i>This may take a few minutes as it creates temp files.</i>", 
         parse_mode=ParseMode.HTML
     )
 
@@ -124,8 +123,11 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for index, acc in enumerate(all_accounts):
         name = acc.get('unique_name', 'Unknown')
-        doc_id = acc['_id']
+        doc_id = str(acc['_id'])
         old_id = acc.get('user_id')
+        
+        # Temp session file name
+        session_name = f"repair_{doc_id}"
         
         # Update progress every 5 accounts
         if index % 5 == 0:
@@ -138,6 +140,7 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
 
+        temp_client = None
         try:
             # 1. Decrypt session
             raw_session = acc.get("session_string")
@@ -148,13 +151,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             session = decrypt_text(raw_session)
             
-            # 2. Connect
+            # 2. Connect using FILE SESSION to avoid SQLite errors
             temp_client = Client(
-                name=f"fixlink_{doc_id}",
+                name=session_name,
                 api_id=TD_API_ID,
                 api_hash=TD_API_HASH,
                 session_string=session,
-                in_memory=True,
+                in_memory=False, # FORCE FILE MODE
                 no_updates=True,
                 device_model=acc.get("device_model", "RepairBot"),
                 system_version=TD_SYSTEM_VERSION,
@@ -166,19 +169,15 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await temp_client.connect()
             
-            # --- CRITICAL FIX: Make userbot known to the bot ---
+            # --- CRITICAL FIX: Send to ID, not Username ---
             handshake_success = False
-            handshake_err = None
             try:
-                # Resolve peer first to ensure we have the entity
-                target_bot = await temp_client.get_users(bot_username)
-                await temp_client.send_message(target_bot.id, "/start")
-                # Wait briefly to ensure delivery
-                await asyncio.sleep(1) 
+                # Send /start to the management bot ID directly
+                await temp_client.send_message(chat_id=bot_id, text="/start")
                 handshake_success = True
             except Exception as e:
-                handshake_err = str(e)
-                logger.error(f"Failed to send handshake from {name}: {e}")
+                # If handshake fails, log specific error but don't stop
+                log_lines.append(f"⚠️ {name} Handshake: {str(e)[:40]}")
             # ---------------------------------------------------
             
             me = await temp_client.get_me()
@@ -188,14 +187,14 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             real_phone = me.phone_number or acc.get('phone_number')
             
             await temp_client.disconnect()
+            temp_client = None # Clear ref
 
-            # 3. Check for differences and Update DB
+            # 3. DB Updates
             updates = {}
             if old_id != real_id:
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
             
-            # Always ensure these are synced
             if acc.get("first_name") != real_first_name:
                 updates["first_name"] = real_first_name
             if acc.get("username") != real_username:
@@ -206,21 +205,37 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if updates:
                 await asyncio.to_thread(
                     accounts_collection.update_one,
-                    {"_id": doc_id},
+                    {"_id": acc['_id']},
                     {"$set": updates}
                 )
                 updated_count += 1
             
+            # 4. Reverse Cache Force (Management Bot looks up User)
+            try:
+                await context.bot.get_chat(real_id)
+            except Exception:
+                pass # Expected if user blocked bot or privacy settings
+
             if handshake_success:
                 fixed_count += 1
-            else:
-                # Log why handshake failed for this specific user
-                log_lines.append(f"⚠️ {name} Handshake Failed: {handshake_err}")
 
         except Exception as e:
             failed_count += 1
             logger.error(f"Fix failed for {name}: {e}")
             log_lines.append(f"❌ {name} Critical: {str(e)[:50]}")
+        finally:
+            # Cleanup temp file
+            if temp_client and temp_client.is_connected:
+                await temp_client.disconnect()
+            
+            # Clean up the .session file generated by Pyrogram
+            try:
+                if os.path.exists(f"{session_name}.session"):
+                    os.remove(f"{session_name}.session")
+                if os.path.exists(f"{session_name}.session-journal"):
+                    os.remove(f"{session_name}.session-journal")
+            except Exception:
+                pass
 
     final_text = (
         f"✅ <b>Repair Complete</b>\n"
@@ -722,7 +737,8 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id:
             try:
                 uid_int = int(user_id)
-                mention = f'<a href="tg://user?id={uid_int}">{display_name}</a>'
+                # Show ID explicitly in the link text to verify correctness
+                mention = f'<a href="tg://user?id={uid_int}">{display_name}</a> [<code>{uid_int}</code>]'
                 status_icon = "🔗"
             except:
                 pass # Keep plain text
