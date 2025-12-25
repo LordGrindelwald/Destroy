@@ -92,27 +92,28 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Force Syncs ALL accounts. 
     1. Uses temporary FILE SESSIONS (fixes 'no such table' error).
-    2. Sends '/start' to the Bot ID (fixes name resolution error).
-    3. Management Bot caches the User ID (fixes unclickable links).
+    2. Sends '/start' to the Bot USERNAME (fixes 'peer_id_invalid').
+    3. Updates DB with real info.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
         
-    bot_id = context.bot.id
-    if not bot_id:
+    # Ensure we have the bot username to send /start to
+    bot_username = context.bot.username
+    if not bot_username:
         me_bot = await context.bot.get_me()
-        bot_id = me_bot.id
+        bot_username = me_bot.username
 
     # Fetch ALL accounts
     all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
     total_count = len(all_accounts)
     
     status_msg = await update.message.reply_text(
-        f"🔄 <b>Starting Deep Repair (File Mode)...</b>\n\n"
+        f"🔄 <b>Starting Deep Repair (Username Mode)...</b>\n\n"
         f"Target: {total_count} accounts.\n"
-        f"Target Bot ID: {bot_id}\n"
-        f"<i>This may take a few minutes as it creates temp files.</i>", 
+        f"Handshake Target: @{bot_username}\n"
+        f"<i>This creates temp files to resolve usernames safely.</i>", 
         parse_mode=ParseMode.HTML
     )
 
@@ -126,7 +127,7 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc_id = str(acc['_id'])
         old_id = acc.get('user_id')
         
-        # Temp session file name
+        # Temp session file name to allow sqlite DB creation
         session_name = f"repair_{doc_id}"
         
         # Update progress every 5 accounts
@@ -151,13 +152,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             session = decrypt_text(raw_session)
             
-            # 2. Connect using FILE SESSION to avoid SQLite errors
+            # 2. Connect using FILE SESSION to enable username resolution
             temp_client = Client(
                 name=session_name,
                 api_id=TD_API_ID,
                 api_hash=TD_API_HASH,
                 session_string=session,
-                in_memory=False, # FORCE FILE MODE
+                in_memory=False, # FORCE FILE MODE for SQLite username tables
                 no_updates=True,
                 device_model=acc.get("device_model", "RepairBot"),
                 system_version=TD_SYSTEM_VERSION,
@@ -169,14 +170,16 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await temp_client.connect()
             
-            # --- CRITICAL FIX: Send to ID, not Username ---
+            # --- CRITICAL FIX: Send to USERNAME ---
             handshake_success = False
             try:
-                # Send /start to the management bot ID directly
-                await temp_client.send_message(chat_id=bot_id, text="/start")
+                # Send /start using the public username
+                # Since in_memory=False, pyrogram can now resolve this peer
+                await temp_client.send_message(chat_id=bot_username, text="/start")
+                await asyncio.sleep(1) 
                 handshake_success = True
             except Exception as e:
-                # If handshake fails, log specific error but don't stop
+                # Log specific handshake error
                 log_lines.append(f"⚠️ {name} Handshake: {str(e)[:40]}")
             # ---------------------------------------------------
             
@@ -187,7 +190,7 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             real_phone = me.phone_number or acc.get('phone_number')
             
             await temp_client.disconnect()
-            temp_client = None # Clear ref
+            temp_client = None 
 
             # 3. DB Updates
             updates = {}
@@ -210,13 +213,13 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 updated_count += 1
             
-            # 4. Reverse Cache Force (Management Bot looks up User)
-            try:
-                await context.bot.get_chat(real_id)
-            except Exception:
-                pass # Expected if user blocked bot or privacy settings
-
+            # 4. Reverse Cache Force (Management Bot looks up User to cache the link)
             if handshake_success:
+                try:
+                    # Now that the userbot has messaged us, we can look them up
+                    await context.bot.get_chat(real_id)
+                except Exception:
+                    pass 
                 fixed_count += 1
 
         except Exception as e:
@@ -224,11 +227,15 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Fix failed for {name}: {e}")
             log_lines.append(f"❌ {name} Critical: {str(e)[:50]}")
         finally:
-            # Cleanup temp file
+            # Ensure client is stopped
             if temp_client and temp_client.is_connected:
-                await temp_client.disconnect()
+                try:
+                    await temp_client.disconnect()
+                except:
+                    pass
             
-            # Clean up the .session file generated by Pyrogram
+            # Clean up the temp .session file generated by Pyrogram
+            # We must clean this up to prevent disk clutter
             try:
                 if os.path.exists(f"{session_name}.session"):
                     os.remove(f"{session_name}.session")
@@ -820,6 +827,7 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Note: Telegram edit_message_text is strict about limits (4096).
     try:
         await query.edit_message_text(
             text=final_text,
