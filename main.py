@@ -30,7 +30,7 @@ from bot_handlers import (
     account_detail_command, toggle_otp_destroy_command, 
     two_fa_conv, update_2fa_password_command,
     # NEW IMPORTS
-    backup_command, restore_command, encrypt_past_command, fix_db_command
+    backup_command, restore_command, encrypt_past_command, fix_db_command, debug_account_command
 )
 
 async def do_nothing(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,6 +97,7 @@ def main() -> None:
     application.add_handler(CommandHandler("restore", restore_command))
     application.add_handler(CommandHandler("encrpast", encrypt_past_command))
     application.add_handler(CommandHandler("fix_db", fix_db_command))
+    application.add_handler(CommandHandler("debug_acc", debug_account_command))
     
     # 3. CallbackQuery Handlers
     # For paused notification button
