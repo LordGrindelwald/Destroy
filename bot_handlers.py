@@ -90,16 +90,17 @@ async def debug_account_command(update: Update, context: ContextTypes.DEFAULT_TY
 @owner_only
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Force Syncs ALL accounts. 
-    1. Uses temporary FILE SESSIONS (fixes 'no such table' error).
-    2. Sends '/start' to the Bot USERNAME (fixes 'peer_id_invalid').
-    3. Updates DB with real info.
+    Force Syncs ALL accounts with Robust Handshake logic.
+    1. Checks if bot is active in RAM (preferred).
+    2. If offline, creates a temp file session.
+    3. Sends '/start' to THIS bot's username (Handshake).
+    4. Updates DB with fresh info.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
         
-    # Ensure we have the bot username to send /start to
+    # Get Bot Username for the handshake
     bot_username = context.bot.username
     if not bot_username:
         me_bot = await context.bot.get_me()
@@ -110,10 +111,10 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_count = len(all_accounts)
     
     status_msg = await update.message.reply_text(
-        f"🔄 <b>Starting Deep Repair (Username Mode)...</b>\n\n"
+        f"🔄 <b>Starting Advanced Repair...</b>\n\n"
         f"Target: {total_count} accounts.\n"
-        f"Handshake Target: @{bot_username}\n"
-        f"<i>This creates temp files to resolve usernames safely.</i>", 
+        f"Handshake Bot: @{bot_username}\n"
+        f"<i>Fixing database & establishing links...</i>", 
         parse_mode=ParseMode.HTML
     )
 
@@ -127,83 +128,90 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc_id = str(acc['_id'])
         old_id = acc.get('user_id')
         
-        # Temp session file name to allow sqlite DB creation
-        session_name = f"repair_{doc_id}"
-        
         # Update progress every 5 accounts
         if index % 5 == 0:
             await status_msg.edit_text(
-                f"🔄 <b>Deep Repair in Progress...</b>\n"
+                f"🔄 <b>Advanced Repair in Progress...</b>\n"
                 f"Processing: {index + 1}/{total_count}\n"
                 f"Handshakes: {fixed_count}\n"
-                f"DB Updates: {updated_count}\n"
+                f"Updates: {updated_count}\n"
                 f"Failures: {failed_count}", 
                 parse_mode=ParseMode.HTML
             )
 
-        temp_client = None
+        client = None
+        is_temp_client = False
+        session_file_path = None
+
         try:
-            # 1. Decrypt session
-            raw_session = acc.get("session_string")
-            if not raw_session:
-                log_lines.append(f"❌ {name}: No session string.")
-                failed_count += 1
-                continue
+            # --- STRATEGY 1: Use Active Client (Best for avoiding DB errors) ---
+            if old_id in active_userbots and active_userbots[old_id].is_connected:
+                client = active_userbots[old_id]
+            else:
+                # --- STRATEGY 2: Create Temp Client (File Mode) ---
+                is_temp_client = True
+                raw_session = acc.get("session_string")
+                if not raw_session:
+                    log_lines.append(f"❌ {name}: No session string.")
+                    failed_count += 1
+                    continue
+                    
+                session = decrypt_text(raw_session)
                 
-            session = decrypt_text(raw_session)
-            
-            # 2. Connect using FILE SESSION to enable username resolution
-            temp_client = Client(
-                name=session_name,
-                api_id=TD_API_ID,
-                api_hash=TD_API_HASH,
-                session_string=session,
-                in_memory=False, # FORCE FILE MODE for SQLite username tables
-                no_updates=True,
-                device_model=acc.get("device_model", "RepairBot"),
-                system_version=TD_SYSTEM_VERSION,
-                app_version=TD_APP_VERSION,
-                lang_code=TD_LANG_CODE,
-                system_lang_code=TD_SYSTEM_LANG_CODE,
-                lang_pack=TD_LANG_PACK
-            )
-            
-            await temp_client.connect()
-            
-            # --- CRITICAL FIX: Send to USERNAME ---
+                # Use a unique file path for the session to prevent 'no such table' concurrency issues
+                session_name = f"repair_temp_{doc_id}"
+                
+                client = Client(
+                    name=session_name,
+                    api_id=TD_API_ID,
+                    api_hash=TD_API_HASH,
+                    session_string=session,
+                    in_memory=False, # File mode is more stable for lookups
+                    no_updates=True,
+                    device_model=acc.get("device_model", "RepairBot"),
+                    system_version=TD_SYSTEM_VERSION,
+                    app_version=TD_APP_VERSION,
+                    lang_code=TD_LANG_CODE,
+                    system_lang_code=TD_SYSTEM_LANG_CODE,
+                    lang_pack=TD_LANG_PACK
+                )
+                await client.connect()
+                session_file_path = f"{session_name}.session"
+
+            # --- HANDSHAKE LOGIC ---
             handshake_success = False
             try:
-                # Send /start using the public username
-                # Since in_memory=False, pyrogram can now resolve this peer
-                await temp_client.send_message(chat_id=bot_username, text="/start")
-                await asyncio.sleep(1) 
+                # Send /start to the management bot
+                await client.send_message(bot_username, "/start")
+                await asyncio.sleep(0.5) 
                 handshake_success = True
             except Exception as e:
-                # Log specific handshake error
-                log_lines.append(f"⚠️ {name} Handshake: {str(e)[:40]}")
-            # ---------------------------------------------------
-            
-            me = await temp_client.get_me()
-            real_id = int(me.id)
-            real_first_name = me.first_name or ""
-            real_username = me.username or None
-            real_phone = me.phone_number or acc.get('phone_number')
-            
-            await temp_client.disconnect()
-            temp_client = None 
+                # Log specific error
+                err_str = str(e)
+                if "PEER_ID_INVALID" in err_str:
+                    log_lines.append(f"⚠️ {name}: Peer Invalid (Bot not found?)")
+                elif "USERNAME_NOT_OCCUPIED" in err_str:
+                    log_lines.append(f"⚠️ {name}: Bot username not found.")
+                else:
+                    log_lines.append(f"⚠️ {name} Handshake: {err_str[:30]}")
 
-            # 3. DB Updates
+            # --- DB SYNC LOGIC ---
+            me = await client.get_me()
+            real_id = int(me.id)
+            
             updates = {}
+            # Check ID mismatch
             if old_id != real_id:
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
             
-            if acc.get("first_name") != real_first_name:
-                updates["first_name"] = real_first_name
-            if acc.get("username") != real_username:
-                updates["username"] = real_username
-            if acc.get("phone_number") != real_phone:
-                updates["phone_number"] = real_phone
+            # Sync metadata
+            if acc.get("first_name") != (me.first_name or ""):
+                updates["first_name"] = me.first_name or ""
+            if acc.get("username") != (me.username or None):
+                updates["username"] = me.username or None
+            if acc.get("phone_number") != (me.phone_number or acc.get("phone_number")):
+                updates["phone_number"] = me.phone_number
 
             if updates:
                 await asyncio.to_thread(
@@ -213,10 +221,10 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 updated_count += 1
             
-            # 4. Reverse Cache Force (Management Bot looks up User to cache the link)
+            # --- REVERSE CACHE FORCE ---
             if handshake_success:
                 try:
-                    # Now that the userbot has messaged us, we can look them up
+                    # Management bot looks up the user to cache the entity
                     await context.bot.get_chat(real_id)
                 except Exception:
                     pass 
@@ -225,24 +233,20 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             failed_count += 1
             logger.error(f"Fix failed for {name}: {e}")
-            log_lines.append(f"❌ {name} Critical: {str(e)[:50]}")
+            log_lines.append(f"❌ {name} Error: {str(e)[:40]}")
         finally:
-            # Ensure client is stopped
-            if temp_client and temp_client.is_connected:
-                try:
-                    await temp_client.disconnect()
-                except:
-                    pass
-            
-            # Clean up the temp .session file generated by Pyrogram
-            # We must clean this up to prevent disk clutter
-            try:
-                if os.path.exists(f"{session_name}.session"):
-                    os.remove(f"{session_name}.session")
-                if os.path.exists(f"{session_name}.session-journal"):
-                    os.remove(f"{session_name}.session-journal")
-            except Exception:
-                pass
+            # Cleanup temp client
+            if is_temp_client and client:
+                if client.is_connected:
+                    try:
+                        await client.disconnect()
+                    except: pass
+                # Clean up session file
+                if session_file_path and os.path.exists(session_file_path):
+                    try:
+                        os.remove(session_file_path)
+                        os.remove(f"{session_file_path}-journal")
+                    except: pass
 
     final_text = (
         f"✅ <b>Repair Complete</b>\n"
@@ -827,7 +831,6 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Note: Telegram edit_message_text is strict about limits (4096).
     try:
         await query.edit_message_text(
             text=final_text,
