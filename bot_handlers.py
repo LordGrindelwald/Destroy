@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
-from pyrogram.errors import PasswordHashInvalid, BadRequest
+from pyrogram.errors import PasswordHashInvalid, BadRequest, PeerIdInvalid, FloodWait
 from pyrogram import Client 
 
 # Import from our own modules
@@ -168,15 +168,17 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # --- CRITICAL FIX: Make userbot known to the bot ---
             handshake_success = False
+            handshake_err = None
             try:
-                # Send /start to the management bot
-                await temp_client.send_message(bot_username, "/start")
+                # Resolve peer first to ensure we have the entity
+                target_bot = await temp_client.get_users(bot_username)
+                await temp_client.send_message(target_bot.id, "/start")
                 # Wait briefly to ensure delivery
                 await asyncio.sleep(1) 
                 handshake_success = True
             except Exception as e:
+                handshake_err = str(e)
                 logger.error(f"Failed to send handshake from {name}: {e}")
-                # Don't fail the whole process, just log it
             # ---------------------------------------------------
             
             me = await temp_client.get_me()
@@ -211,11 +213,14 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if handshake_success:
                 fixed_count += 1
+            else:
+                # Log why handshake failed for this specific user
+                log_lines.append(f"⚠️ {name} Handshake Failed: {handshake_err}")
 
         except Exception as e:
             failed_count += 1
             logger.error(f"Fix failed for {name}: {e}")
-            log_lines.append(f"⚠️ {name} Error: {str(e)[:50]}")
+            log_lines.append(f"❌ {name} Critical: {str(e)[:50]}")
 
     final_text = (
         f"✅ <b>Repair Complete</b>\n"
@@ -223,10 +228,10 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Handshakes Sent: {fixed_count}\n"
         f"DB Updates: {updated_count}\n"
         f"Failures: {failed_count}\n\n" +
-        "\n".join(log_lines[:15]) # Show first 15 logs
+        "\n".join(log_lines[:20]) 
     )
-    if len(log_lines) > 15:
-        final_text += f"\n...and {len(log_lines) - 15} more."
+    if len(log_lines) > 20:
+        final_text += f"\n...and {len(log_lines) - 20} more."
     
     await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
 
@@ -411,6 +416,9 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     else:
         await update.message.reply_html(message_text, reply_markup=reply_markup)
+
+# --- /add command is now handled by gen_conv in session_generator.py ---
+# --- /remove command is now a ConversationHandler below ---
 
 @owner_only
 async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2012,14 +2020,10 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
 
-# --- NEW: Manual 2FA Update Command ---
+# --- 2FA Config ---
 
 @owner_only
 async def update_2fa_password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Updates the stored 2FA password in the database manually.
-    Usage: /update2fa <name_or_id> <password>
-    """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available.")
         return
@@ -2029,10 +2033,7 @@ async def update_2fa_password_command(update: Update, context: ContextTypes.DEFA
         return
     
     identifier = context.args[0]
-    new_password = context.args[1] # Take only the second argument as password
-    
-    # We might want to support spaces in passwords later, but for now strict
-    # if len(context.args) > 2: ... (logic for spaced passwords)
+    new_password = context.args[1] 
     
     account = await get_account_from_arg(identifier)
     
@@ -2050,8 +2051,7 @@ async def update_2fa_password_command(update: Update, context: ContextTypes.DEFA
         f"✅ Updated stored 2FA password for <b>{escape_html(account.get('first_name'))}</b> (<code>{account.get('user_id')}</code>)."
     )
 
-
-# --- NEW: 2FA Configuration Conversation ---
+# --- 2FA CONVERSATION ---
 
 @owner_only
 async def two_fa_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2249,8 +2249,6 @@ async def handle_2fa_password_input(update: Update, context: ContextTypes.DEFAUL
         "ℹ️ You can reply with <code>#empty#</code> to set no 2FA HINT."
     )
     return AWAIT_HINT_2FA
-
-# --- REBUILT LOGIC FOR SEQUENTIAL 2FA PROCESSING ---
 
 @owner_only
 async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
