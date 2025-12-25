@@ -49,12 +49,15 @@ from session_generator import generate_command
 # --- Constants ---
 ACCOUNTS_PER_PAGE = 16 
 
-# --- DEBUG & REPAIR COMMANDS ---
+# ==============================================================================
+#                       DEBUG & REPAIR COMMANDS
+# ==============================================================================
 
 @owner_only
 async def debug_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     DEBUG TOOL: Dumps the raw MongoDB document for a specific account.
+    Usage: /debug_acc <unique_name>
     """
     if not context.args:
         await update.message.reply_text("Usage: /debug_acc <unique_name_or_id>")
@@ -88,8 +91,9 @@ async def debug_account_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Force Syncs ALL accounts. 
-    1. Verifies IDs are correct.
-    2. Forces the userbot to message the Management Bot (/start) to enable clickable mentions.
+    1. Decrypts session and connects to Telegram.
+    2. Sends '/start' to the Management Bot (Handshake) to enable mentions.
+    3. Updates user_id, first_name, username, and phone in DB.
     """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
@@ -106,9 +110,10 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_count = len(all_accounts)
     
     status_msg = await update.message.reply_text(
-        f"🔄 <b>Fixing Mentions...</b>\n\n"
-        f"Scanning {total_count} accounts.\n"
-        f"Making each account say 'Hi' to @{bot_username} so mentions become clickable.", 
+        f"🔄 <b>Starting Deep Repair...</b>\n\n"
+        f"Target: {total_count} accounts.\n"
+        f"Action: Connect -> Handshake with @{bot_username} -> Update DB.\n"
+        f"<i>This may take a while.</i>", 
         parse_mode=ParseMode.HTML
     )
 
@@ -125,10 +130,11 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Update progress every 5 accounts
         if index % 5 == 0:
             await status_msg.edit_text(
-                f"🔄 <b>Fixing Mentions...</b>\n"
-                f"Progress: {index}/{total_count}\n"
-                f"Registered: {fixed_count}\n"
-                f"Failed: {failed_count}", 
+                f"🔄 <b>Deep Repair in Progress...</b>\n"
+                f"Processing: {index + 1}/{total_count}\n"
+                f"Handshakes: {fixed_count}\n"
+                f"DB Updates: {updated_count}\n"
+                f"Failures: {failed_count}", 
                 parse_mode=ParseMode.HTML
             )
 
@@ -161,13 +167,16 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await temp_client.connect()
             
             # --- CRITICAL FIX: Make userbot known to the bot ---
+            handshake_success = False
             try:
                 # Send /start to the management bot
                 await temp_client.send_message(bot_username, "/start")
                 # Wait briefly to ensure delivery
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1) 
+                handshake_success = True
             except Exception as e:
-                logger.error(f"Failed to send start message from {name}: {e}")
+                logger.error(f"Failed to send handshake from {name}: {e}")
+                # Don't fail the whole process, just log it
             # ---------------------------------------------------
             
             me = await temp_client.get_me()
@@ -184,12 +193,11 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 updates["user_id"] = real_id
                 log_lines.append(f"🔧 {name}: ID fixed {old_id} -> {real_id}")
             
+            # Always ensure these are synced
             if acc.get("first_name") != real_first_name:
                 updates["first_name"] = real_first_name
-            
             if acc.get("username") != real_username:
                 updates["username"] = real_username
-
             if acc.get("phone_number") != real_phone:
                 updates["phone_number"] = real_phone
 
@@ -201,94 +209,135 @@ async def fix_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 updated_count += 1
             
-            fixed_count += 1
+            if handshake_success:
+                fixed_count += 1
 
         except Exception as e:
             failed_count += 1
             logger.error(f"Fix failed for {name}: {e}")
+            log_lines.append(f"⚠️ {name} Error: {str(e)[:50]}")
 
     final_text = (
-        f"✅ <b>Mention Repair Complete</b>\n"
-        f"Total Scanned: {total_count}\n"
+        f"✅ <b>Repair Complete</b>\n"
+        f"Scanned: {total_count}\n"
         f"Handshakes Sent: {fixed_count}\n"
-        f"DB Updates: {updated_count}\n\n" +
-        "\n".join(log_lines[:10])
+        f"DB Updates: {updated_count}\n"
+        f"Failures: {failed_count}\n\n" +
+        "\n".join(log_lines[:15]) # Show first 15 logs
     )
+    if len(log_lines) > 15:
+        final_text += f"\n...and {len(log_lines) - 15} more."
     
     await status_msg.edit_text(final_text, parse_mode=ParseMode.HTML)
 
-# --- BACKUP COMMANDS ---
+# ==============================================================================
+#                       BACKUP & RESTORE COMMANDS
+# ==============================================================================
 
 @owner_only
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backups the MongoDB accounts collection to a JSON file."""
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
+    
     status_msg = await update.message.reply_text("⏳ Generating backup...")
+    
     try:
+        # Run DB fetching in thread
         data = await asyncio.to_thread(lambda: list(accounts_collection.find()))
+        
+        # Serialize to JSON (bson.json_util handles ObjectId and datetime)
         json_data = dumps(data, indent=2)
+        
         file_path = "userbot_backup.json"
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(json_data)
+            
         await update.message.reply_document(
             document=open(file_path, "rb"),
             filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             caption=f"📦 <b>Full Database Backup</b>\n\nContains {len(data)} accounts.",
             parse_mode=ParseMode.HTML
         )
+        
         os.remove(file_path)
         await status_msg.delete()
+        
     except Exception as e:
         logger.error(f"Backup failed: {e}")
         await status_msg.edit_text(f"❌ Backup failed: {e}")
 
 @owner_only
 async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restores the database from a JSON file (replacing existing data)."""
     msg = update.message
+    
+    # Check if a file is attached or replied to
     document = msg.document
     if not document and msg.reply_to_message:
         document = msg.reply_to_message.document
+        
     if not document:
-        await msg.reply_text("❌ Please send this command with a backup JSON file.")
+        await msg.reply_text("❌ Please send this command with a backup JSON file (or reply to one).")
         return
+        
     if accounts_collection is None:
         await msg.reply_text("⚠️ Database connection error.")
         return
+        
     status_msg = await msg.reply_text("⏳ Downloading and verifying backup...")
+    
     file_path = "temp_restore.json"
     try:
         telegram_file = await document.get_file()
         await telegram_file.download_to_drive(file_path)
+        
         with open(file_path, "r", encoding="utf-8") as f:
+            # bson.json_util.loads converts strings back to ObjectIds
             data = loads(f.read())
+            
         if not isinstance(data, list):
-            await status_msg.edit_text("❌ Invalid backup file format.")
+            await status_msg.edit_text("❌ Invalid backup file format (Root must be a list).")
             return
-        await status_msg.edit_text(f"⚠️ <b>Restoring {len(data)} accounts...</b>\nExisting data will be wiped.", parse_mode=ParseMode.HTML)
+            
+        await status_msg.edit_text(f"⚠️ <b>Restoring {len(data)} accounts...</b>\n\nExisting data will be wiped.", parse_mode=ParseMode.HTML)
+        
+        # Perform Restore
         await asyncio.to_thread(accounts_collection.delete_many, {})
         if data:
             await asyncio.to_thread(accounts_collection.insert_many, data)
-        await status_msg.edit_text(f"✅ <b>Restore Successful!</b>\nRestored {len(data)} accounts.\nPlease /restart the bot.", parse_mode=ParseMode.HTML)
+            
+        await status_msg.edit_text(f"✅ <b>Restore Successful!</b>\n\nRestored {len(data)} accounts.\nPlease /restart the bot to apply changes.", parse_mode=ParseMode.HTML)
+        
     except Exception as e:
         logger.error(f"Restore failed: {e}")
         await status_msg.edit_text(f"❌ Restore failed: {e}")
     finally:
-        if os.path.exists(file_path): os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 @owner_only
 async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Encrypts any plain-text session strings in the database."""
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection error.")
         return
-    status_msg = await update.message.reply_text("🔐 Scanning database...")
+        
+    status_msg = await update.message.reply_text("🔐 Scanning database for unencrypted sessions...")
+    
     try:
+        # Fetch all accounts
         all_accounts = await asyncio.to_thread(lambda: list(accounts_collection.find()))
         encrypted_count = 0
+        
         for acc in all_accounts:
             raw_session = acc.get("session_string")
             if raw_session and not raw_session.startswith("gAAAAA"):
+                # It doesn't look like a Fernet token, let's encrypt it
                 new_session = encrypt_text(raw_session)
+                
+                # Double check it actually changed
                 if new_session != raw_session:
                     await asyncio.to_thread(
                         accounts_collection.update_one,
@@ -296,47 +345,68 @@ async def encrypt_past_command(update: Update, context: ContextTypes.DEFAULT_TYP
                         {"$set": {"session_string": new_session}}
                     )
                     encrypted_count += 1
-        await status_msg.edit_text(f"✅ <b>Encryption Complete</b>\nEncrypted {encrypted_count} accounts.", parse_mode=ParseMode.HTML)
+        
+        await status_msg.edit_text(f"✅ <b>Encryption Complete</b>\n\nSuccessfully encrypted {encrypted_count} old accounts.", parse_mode=ParseMode.HTML)
+        
     except Exception as e:
         logger.error(f"Encryption scan failed: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
 
-# --- STANDARD COMMAND HANDLERS ---
+# ==============================================================================
+#                       STANDARD COMMAND HANDLERS
+# ==============================================================================
 
 @owner_only
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_html("Personal Account Manager.")
+    await update.message.reply_html(
+        "Personal Account Manager."
+    )
 
 @owner_only
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gracefully stops the application and triggers a container restart (exit code 1)."""
+    
     if update.callback_query:
         await update.callback_query.answer("Restarting...")
         message_context = update.callback_query.message
     else:
         message_context = update.message
+        
     await message_context.reply_text("🔄 Restarting service now...")
+    
+    # --- NEW: Stop all running jobs ---
     logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
     for user_id in list(active_online_jobs.keys()):
         stop_online_job(user_id)
+    # --- End ---
+    
     if active_userbots:
-        logger.info(f"Stopping {len(active_userbots)} userbot clients...")
+        logger.info(f"Stopping {len(active_userbots)} userbot clients before restart...")
         stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
         await asyncio.gather(*stop_tasks, return_exceptions=True)
         active_userbots.clear()
+        
     logger.info("Triggering application shutdown.")
-    await context.application.stop_running()
+    await context.application.stop_running() 
+    
     sys.exit(1)
+
 
 @owner_only
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("👤 Manage Accounts", callback_data="manage_accounts")],
-        [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")]
+        [InlineKeyboardButton("➕ Add New Account", callback_data="call_add_command")] # <-- This now calls gen_conv
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message_text = "<b>Accounts Dashboard</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    message_text = (
+        "<b>Accounts Dashboard</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
     if update.callback_query:
         await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     else:
@@ -344,77 +414,129 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /rename <identifier> <new_name>"""
+    
     if accounts_collection is None:
-        await update.message.reply_text("⚠️ Database connection error.")
+        await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
         return
+
     if len(context.args) != 2:
         await update.message.reply_text("Usage: /rename <user_id_or_name> <new_unique_name>")
         return
+        
     identifier = context.args[0]
+    # --- FIX: Sanitize input ---
     new_name = sanitize_unique_name(context.args[1])
+    
     account = await get_account_from_arg(identifier)
     if not account:
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
-    existing_with_name = await asyncio.to_thread(accounts_collection.find_one, {"unique_name": new_name})
+
+    # Run blocking DB calls in a thread
+    existing_with_name = await asyncio.to_thread(
+        accounts_collection.find_one, 
+        {"unique_name": new_name}
+    )
+    
     if existing_with_name and existing_with_name["_id"] != account["_id"]:
-        await update.message.reply_text(f"⚠️ Name <code>{escape_html(new_name)}</code> is taken.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"⚠️ The name <code>{escape_html(new_name)}</code> is already taken by account <code>{existing_with_name.get('user_id')}</code>.", parse_mode=ParseMode.HTML)
         return
-    await asyncio.to_thread(accounts_collection.update_one, {"_id": account["_id"]}, {"$set": {"unique_name": new_name}})
-    await update.message.reply_text(f"✔️ Renamed to <code>{escape_html(new_name)}</code>.", parse_mode=ParseMode.HTML)
+    
+    # Run blocking DB calls in a thread
+    await asyncio.to_thread(
+        accounts_collection.update_one,
+        {"_id": account["_id"]}, # Use _id to be specific
+        {"$set": {"unique_name": new_name}}
+    )
+    
+    await update.message.reply_text(
+        f"✔️ Account <b>{escape_html(account.get('first_name'))}</b> "
+        f"(<code>{account['user_id']}</code>) renamed to <code>{escape_html(new_name)}</code>.",
+        parse_mode=ParseMode.HTML
+    )
 
 @owner_only
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_bots = 0
     if accounts_collection is not None:
-        total_bots = await asyncio.to_thread(accounts_collection.count_documents, {})
+        # Run blocking DB calls in a thread
+        total_bots = await asyncio.to_thread(
+            accounts_collection.count_documents, 
+            {}
+        )
+        
     running_bots = len(active_userbots)
     running_jobs = len(active_online_jobs)
-    status_text = (f"<b>Bot Status</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+    
+    status_text = (f"<b>Bot Status</b>\n"
+                   f"━━━━━━━━━━━━━━━━━━━━\n"
                    f"<b>Accounts Active:</b> {running_bots}/{total_bots}\n"
-                   f"<b>Online Jobs:</b> {running_jobs}\n"
-                   f"<b>Paused OTP Destruction:</b> {len(paused_forwarding)} bots\n"
+                   f"<b>Online Jobs Active:</b> {running_jobs}\n"
+                   f"<b>Paused OTP Destruction:</b> {len(paused_forwarding)} bots (temp)\n"
                    f"<b>Paused OTP Forwarding:</b> {'Yes' if OWNER_ID in paused_notifications else 'No'}\n")
     await update.message.reply_html(status_text)
 
 @owner_only
 async def temp_pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses a single account's OTP Destruction temporarily."""
     if not context.args:
         await update.message.reply_text("Usage: /temp <user_id_or_name>")
         return
+        
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
+        return
+
     try:
         identifier = context.args[0]
+        # get_account_from_arg is already async (but it shouldn't be, it's blocking)
+        # We'll assume it's fast enough for now to avoid rewriting utils.py
         account = await get_account_from_arg(identifier)
+        
         if not account:
-            await update.message.reply_text(f"⚠️ Account not found.")
+            await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
             return
+
         user_id_to_pause = account['user_id']
+        
+        # --- NEW: Check if permanently disabled ---
         if not account.get("otp_destroy_enabled", True):
-            await update.message.reply_text("⚠️ OTP Destruction is permanently disabled.")
+            await update.message.reply_text(f"⚠️ OTP Destruction is permanently disabled for <code>{escape_html(account.get('first_name'))}</code>. /temp command is not applicable.", parse_mode=ParseMode.HTML)
             return
+        # --- END NEW ---
+
         if user_id_to_pause not in active_userbots:
-            await update.message.reply_text("Bot not active.")
+            await update.message.reply_text("User ID found but bot is not active.")
             return
+
         pause_id = f"{user_id_to_pause}_{int(datetime.now().timestamp())}"
         context.bot_data[pause_id] = False 
+
         paused_forwarding.add(user_id_to_pause)
+        
         keyboard = [[InlineKeyboardButton("Pause Notifications", callback_data=f"pause_notify_{pause_id}")]]
-        message = await update.message.reply_text(f"✅ Paused OTP destruction for {escape_html(account.get('first_name'))} (5m).", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        message = await update.message.reply_text(f"✅ Paused OTP destruction for <code>{escape_html(account.get('first_name'))}</code> (<code>{user_id_to_pause}</code>) for 5 minutes.",
+                                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        
         context.application.job_queue.run_once(
             callback=resume_forwarding_job,
             when=300, 
             data={'user_id': user_id_to_pause, 'pause_id': pause_id, 'message_id': message.message_id},
             name=f"resume_{pause_id}"
         )
+
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /temp <user_id_or_name>")
 
 @owner_only
 async def temp_pause_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pauses all userbots' OTP Destruction and forwarding."""
     for user_id in active_userbots.keys():
         paused_forwarding.add(user_id)
     paused_notifications.add(OWNER_ID)
-    await update.message.reply_text("✅ Paused all OTP Destruction (5m).")
+    await update.message.reply_text("✅ Paused all OTP Destruction and forwarding for 5 minutes.")
+    
     context.application.job_queue.run_once(resume_all_job, 300, name="resume_all")
 
 @owner_only
@@ -427,44 +549,74 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Stopping accounts...")
+    msg = await update.message.reply_text("🔄 Stopping all accounts...")
+    
+    # --- NEW: Stop all running jobs ---
+    logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
     for user_id in list(active_online_jobs.keys()):
         stop_online_job(user_id)
+    # --- End ---
+    
     stop_tasks = [client.stop() for client in active_userbots.values() if client.is_connected]
     await asyncio.gather(*stop_tasks, return_exceptions=True)
     active_userbots.clear()
+    
     await asyncio.sleep(2)
-    await msg.edit_text("🔄 Restarting and refreshing...")
+
+    await msg.edit_text("🔄 Restarting and refreshing account info...")
+    
     total_bots = 0
-    if accounts_collection:
-        total_bots = await asyncio.to_thread(accounts_collection.count_documents, {})
-    _, _, errors = await start_all_userbots_from_db(context.application, update_info=True)
+    if accounts_collection is not None:
+        # Run blocking DB calls in a thread
+        total_bots = await asyncio.to_thread(
+            accounts_collection.count_documents,
+            {}
+        )
+    else:
+        await msg.edit_text("⚠️ Database connection is not available. Cannot refresh.")
+        return
+        
+    _, _, errors = await start_all_userbots_from_db(
+        context.application, 
+        update_info=True
+    )
+    
     running_bots = len(active_userbots)
     final_message = f"✅ <b>Refresh Complete</b>\nStarted {running_bots}/{total_bots} accounts."
+
     if errors:
-        final_message += "\n❌ Errors:\n" + "\n".join(errors)
-    if len(final_message) > 4096:
-        await msg.edit_text("Refresh done with errors (log too long).", parse_mode=ParseMode.HTML)
+        error_message = "\n\n❌ <b>Errors Encountered:</b>\n" + "\n".join(errors)
+        if len(final_message) + len(error_message) > 4096:
+            await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
+            await update.message.reply_html(error_message)
+        else:
+            final_message += error_message
+            await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
     else:
         await msg.edit_text(final_message, parse_mode=ParseMode.HTML)
 
 @owner_only
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """General cancel command, clears user_data but not conv handler."""
     context.user_data.clear()
     await update.message.reply_text("Action cancelled.")
 
-# --- ACCOUNT LISTING AND MENUS ---
+# ==============================================================================
+#                       ACCOUNTS LIST & MENU HANDLERS
+# ==============================================================================
 
 @owner_only
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles /accs command.
-    UPDATED: Displays the raw ID next to the name for debugging.
+    REWRITTEN: Uses HTML with Strict Integer ID enforcement to fix links.
+    Includes visual debugging indicators.
     """
     if accounts_collection is None:
         await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
         return
         
+    # Run blocking DB calls in a thread
     accounts = await asyncio.to_thread(
         lambda: list(accounts_collection.find().sort("unique_name", 1))
     )
@@ -473,9 +625,17 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("You own 0 Accounts!")
         return
 
+    # --- Helper to send chunks ---
     async def send_smart_chunks(header, items):
+        """
+        Sends a list of items in chunks.
+        Splits if:
+        1. Character count exceeds 4000 (Telegram limit is 4096).
+        2. Item count exceeds 50 (User preference).
+        """
         current_chunk = header
-        current_count = 0
+        current_count = 0 
+        
         for item in items:
             if (len(current_chunk) + len(item) + 1 > 4000) or (current_count >= 50):
                 await update.message.reply_html(current_chunk, disable_web_page_preview=True)
@@ -487,13 +647,16 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                      current_chunk += "\n" + item
                 current_count += 1
+                
         if current_chunk:
             await update.message.reply_html(current_chunk, disable_web_page_preview=True)
+    # -----------------------------
 
     # --- DETAILED VIEW ---
     if context.args and context.args[0] == "-de":
         header_text = "👤 <b>Your Managed Accounts (Detailed):</b>\n"
         items = []
+
         for acc in accounts:
             user_id = acc.get('user_id')
             unique_name = escape_html(acc.get('unique_name', ''))
@@ -511,6 +674,7 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id:
                 try:
                     uid_int = int(user_id)
+                    # Show ID explicitly in the link text to verify correctness
                     mention = f'<a href="tg://user?id={uid_int}">{display_name}</a>'
                     status_icon = "🔗" 
                 except:
@@ -526,12 +690,13 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{device_model} ({escape_html(online_interval)} min)\n" 
                 f"<b>ID:</b> {user_id if user_id else 'MISSING'}"
             )
+            # Add separator for readability
             items.append(entry_text + f"\n{'-'*25}")
         
         await send_smart_chunks(header_text, items)
         return
 
-    # --- CONCISE VIEW ---
+    # --- CONCISE VIEW (Default) ---
     header_text = f"You own {len(accounts)} Accounts!\n"
     items = []
     
@@ -539,29 +704,34 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = acc.get('user_id')
         unique_name = escape_html(acc.get('unique_name', ''))
         first_name = escape_html(acc.get('first_name', ''))
-        phone = acc.get('phone_number')
-        phone_str = f"+<code>{escape_html(phone)}</code>" if phone else "No Phone"
-        interval = acc.get('online_interval', '1440')
-        interval_str = f" (⌚ {interval}m)" if interval != '1440' else ""
         
+        # Determine display name and link
         display_name = unique_name or first_name or "User"
+        
         mention = display_name
         status_icon = "📄"
         
         if user_id:
             try:
                 uid_int = int(user_id)
-                # Show ID explicitly in the link text to verify correctness
-                mention = f'<a href="tg://user?id={uid_int}">{display_name}</a> [<code>{uid_int}</code>]'
+                mention = f'<a href="tg://user?id={uid_int}">{display_name}</a>'
                 status_icon = "🔗"
             except:
-                mention = f"{display_name} [Bad ID: {user_id}]"
+                pass # Keep plain text
         else:
+            # Fallback if ID is missing entirely
             mention = f"{display_name} [No ID]"
 
+        phone = acc.get('phone_number')
+        phone_str = f"+<code>{escape_html(phone)}</code>" if phone else "No Phone"
+        
+        interval = acc.get('online_interval', '1440')
+        interval_str = f" (⌚ {interval}m)" if interval != '1440' else ""
+        
         items.append(f"{status_icon} {mention}: {phone_str}{interval_str}")
 
     await send_smart_chunks(header_text, items)
+
 
 @owner_only
 async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -569,27 +739,39 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if accounts_collection is None:
-        await query.edit_message_text("⚠️ Database connection is not available.")
+        await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return
         
-    accounts = await asyncio.to_thread(lambda: list(accounts_collection.find().sort("unique_name", 1)))
+    # Run blocking DB calls in a thread
+    accounts = await asyncio.to_thread(
+        lambda: list(accounts_collection.find().sort("unique_name", 1))
+    )
     
     base_text = "👤 <b>Your Managed Accounts:</b>\n\n"
     text_parts = []
 
     if not accounts:
-        base_text += "No accounts yet."
+        base_text += "No accounts have been added yet.\n\n"
+        base_text += "ℹ️ <i>Run /refresh to update details.</i>"
     else:
         for acc in accounts:
             user_id = acc.get('user_id')
-            unique_name = escape_html(acc.get('unique_name', ''))
-            first_name = escape_html(acc.get('first_name', ''))
-            username = escape_html(acc.get('username', 'N/A'))
-            phone = escape_html(acc.get('phone_number', 'N/A'))
-            device = escape_html(acc.get('device_model', 'N/A'))
-            interval = acc.get('online_interval', '1440')
+            
+            raw_first_name = acc.get('first_name')
+            raw_unique_name = acc.get('unique_name')
+            raw_username = acc.get('username')
+            raw_phone = acc.get('phone_number') 
+            online_interval = acc.get('online_interval', '1440') 
 
+            first_name = escape_html(raw_first_name) if raw_first_name else None
+            unique_name = escape_html(raw_unique_name) if raw_unique_name else None
+            username_str = f"@{escape_html(raw_username)}" if raw_username else 'N/A'
+            phone_str = f"+{escape_html(raw_phone)}" if raw_phone else 'N/A'
+            
+            device_model = acc.get('device_model', 'N/A')
+            
             display = unique_name or first_name or f"ID: {user_id}"
+            
             mention = display
             if user_id:
                 try:
@@ -597,27 +779,43 @@ async def accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     mention = f'<a href="tg://user?id={uid_int}">{display}</a>'
                 except:
                     pass
-            
-            entry = (
+
+            entry_text = (
                 f"{mention}\n"
-                f"<b>User:</b> @{username}\n"
-                f"<b>Phone:</b> +{phone}\n"
-                f"{device} ({interval} min)\n"
-                f"<b>ID:</b> {user_id}"
+                f"<b>User:</b> {username_str}\n"
+                f"<b>Phone:</b> {phone_str}\n"
+                f"{escape_html(device_model)}"
+                f"  ({escape_html(online_interval)} min)\n"
+                f"<b>ID:</b> {user_id if user_id else 'N/A'}"
             )
-            text_parts.append(entry)
+            text_parts.append(entry_text)
 
     final_text = base_text + f"\n{'-'*25}\n".join(text_parts)
+
+    # --- FIX: Removed "Back to Settings" button ---
     keyboard = []
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        await query.edit_message_text(text=final_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+        await query.edit_message_text(
+            text=final_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True 
+        )
     except Exception as e:
         if "Message is too long" in str(e):
-             await query.edit_message_text("⚠️ Too many accounts for menu. Use /accs command.", parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+             await query.edit_message_text(
+                "⚠️ <b>Too many accounts to display in this menu.</b>\n"
+                "Please use the <code>/accs</code> or <code>/accs -de</code> command instead, "
+                "which supports multi-message splitting.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+             )
         else:
              logger.error(f"Error in accounts_menu: {e}")
+
+# --- execute_remove_account is now part of the remove_conv ---
 
 @owner_only
 async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, text: str):
@@ -633,6 +831,7 @@ async def set_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE, step
 
 @owner_only
 async def pause_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback for the 'Pause Notifications' button."""
     query = update.callback_query
     await query.answer()
     
@@ -656,9 +855,15 @@ async def pause_notifications_callback(update: Update, context: ContextTypes.DEF
         reply_markup=None
     )
 
+# --- Message Handler (for multiple strings) ---
+
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles text input for flows that use context.user_data['next_step'].
+    """
     if update.effective_user.id != OWNER_ID:
         return
+        
     step = context.user_data.get('next_step')
     persistent_device_model = context.user_data.get('persistent_device_model')
 
@@ -666,6 +871,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     del context.user_data['next_step']
+    
     text = update.message.text
     session_strings = [clean_session_string(s) for s in text.replace(",", " ").replace("\n", " ").split() if s.strip()]
     msg = await update.message.reply_text(f"Processing {len(session_strings)} strings...")
@@ -691,17 +897,22 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"Batch complete! ✅ Added: {success}, ❌ Failed: {fail}")
     await asyncio.sleep(3); await settings_command(update, context)
 
-# --- PASTE CONVERSATION ---
 
+# --- BUGFIX: New self-contained cancel function ---
 @owner_only
 async def cancel_paste_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the paste string conversation."""
     context.user_data.clear()
     if update.message:
         await update.message.reply_text("✖️ Paste account process cancelled.")
     return ConversationHandler.END
+# --- END BUGFIX ---
+
+# --- NEW Paste Single String Conversation Handler ---
 
 @owner_only
 async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for pasting a single string. Asks for unique name."""
     query = update.callback_query
     await query.answer()
     
@@ -713,6 +924,9 @@ async def prompt_for_unique_name_paste(update: Update, context: ContextTypes.DEF
 
 @owner_only
 async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saves unique name and asks for session string."""
+    
+    # --- FIX: Sanitize input ---
     raw_input = update.message.text.strip().split()[0]
     unique_name = sanitize_unique_name(raw_input)
     
@@ -720,6 +934,7 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("⚠️ Database connection is not available. Please /cancel and try again.")
         return ConversationHandler.END
 
+    # Run blocking DB calls in a thread
     account = await asyncio.to_thread(
         accounts_collection.find_one, 
         {"unique_name": unique_name}
@@ -734,6 +949,7 @@ async def get_unique_name_for_paste(update: Update, context: ContextTypes.DEFAUL
 
 @owner_only
 async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gets session string, adds account, and ends conversation."""
     session_string = clean_session_string(update.message.text)
     unique_name = context.user_data.get('unique_name')
     persistent_device_model = context.user_data.get('persistent_device_model') 
@@ -762,6 +978,7 @@ async def get_session_string_and_add(update: Update, context: ContextTypes.DEFAU
     context.user_data.clear()
     return ConversationHandler.END
 
+# --- Define the ConversationHandler ---
 paste_single_conv = ConversationHandler(
     entry_points=[CallbackQueryHandler(prompt_for_unique_name_paste, pattern="^add_single$")],
     states={
@@ -769,16 +986,20 @@ paste_single_conv = ConversationHandler(
         AWAIT_STRING_PASTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_session_string_and_add)],
     },
     fallbacks=[
-        CommandHandler("cancel", cancel_paste_conv), 
-        *COMMAND_FALLBACKS
+        CommandHandler("cancel", cancel_paste_conv), # <-- BUGFIX
+        *COMMAND_FALLBACKS # <-- BUGFIX
     ],
     conversation_timeout=300,
 )
 
-# --- ONLINE INTERVAL CONVERSATION ---
+
+# --- REBUILT: Online Interval Flow ---
 
 @owner_only
 async def online_interval_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 1) Sends the initial /online_interval command response.
+    """
     keyboard = [[InlineKeyboardButton("OnlineInterval settings ⌚️⚙️", callback_data="oi_start_selection")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_html(
@@ -787,7 +1008,11 @@ async def online_interval_start(update: Update, context: ContextTypes.DEFAULT_TY
     )
     return AWAIT_BUTTON
 
+
 async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Images 2, 3, 4) Draws the paginated multi-select account menu.
+    """
     query = update.callback_query
     
     all_account_ids = context.user_data.get('all_account_ids', [])
@@ -807,6 +1032,7 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
     
     page_accounts = []
     if accounts_collection is not None:
+        # Run blocking DB calls in a thread
         page_accounts = await asyncio.to_thread(
             lambda: list(accounts_collection.find(
                 {"user_id": {"$in": page_account_ids}},
@@ -837,8 +1063,16 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
         interval = acc.get('online_interval', '1440') 
         
         is_selected = user_id in selected_accounts
-        prefix = "✅" if is_selected else ("⌚️" if interval != '1440' else "")
+        
+        # --- EMOJI FIX ---
+        prefix = ""
+        if is_selected:
+            prefix = "✅"
+        elif interval != '1440':
+            prefix = "⌚️"
+        
         button_text = f"{prefix} {name} ({interval}m)".strip()
+        # --- END EMOJI FIX ---
         
         callback = f"oi_toggle_{user_id}"
         account_buttons.append(InlineKeyboardButton(button_text, callback_data=callback))
@@ -856,7 +1090,10 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
         page_buttons.append(InlineKeyboardButton("Next ➡️", callback_data="oi_next_page"))
     keyboard.append(page_buttons)
 
+    # --- FIX: Add Cancel Button ---
+    # --- BUGFIX: Changed callback_data to not conflict with state pattern ---
     keyboard.append([InlineKeyboardButton("« Cancel", callback_data="cancel_oi_conv")])
+    # --- END FIX ---
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -866,6 +1103,7 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
         f"Selected: {len(selected_accounts)} / {total_accounts}"
     )
     
+    # This function is only called from callbacks, so we always edit
     try:
         await query.edit_message_text(message_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     except Exception as e:
@@ -873,8 +1111,13 @@ async def draw_account_selection_menu(update: Update, context: ContextTypes.DEFA
         
     return SELECT_ACCOUNTS
 
+
 @owner_only
 async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 2) Entry point for the ConversationHandler.
+    Fetches all accounts, sets up user_data, and draws the menu.
+    """
     query = update.callback_query
     await query.answer()
     
@@ -882,6 +1125,7 @@ async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
+    # Run blocking DB calls in a thread
     all_accounts = await asyncio.to_thread(
         lambda: list(accounts_collection.find({}, {"user_id": 1}))
     )
@@ -898,8 +1142,12 @@ async def online_interval_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     
     return await draw_account_selection_menu(update, context)
 
+
 @owner_only
 async def handle_account_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Image 3) Handles all button presses within the account selection menu.
+    """
     query = update.callback_query
     await query.answer()
     
@@ -963,8 +1211,12 @@ async def handle_account_selection_callback(update: Update, context: ContextType
     context.user_data['selected_accounts'] = selected_accounts
     return await draw_account_selection_menu(update, context)
 
+
 @owner_only
 async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Step 6) Handles the text input for the interval.
+    """
     user_input = update.message.text.strip()
     selected_accounts = context.user_data.get('selected_accounts', set())
     
@@ -999,24 +1251,31 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Invalid format. Please send a number (e.g., 60) or a range (e.g., 30-90) between 1 and 1440.")
         return AWAIT_INTERVAL 
 
+    # Run blocking DB calls in a thread
     await asyncio.to_thread(
         accounts_collection.update_many,
         {"user_id": {"$in": list(selected_accounts)}},
         {"$set": {"online_interval": interval_to_set}}
     )
     
+    # --- NEW: Update running jobs ---
     for user_id in selected_accounts:
-        stop_online_job(user_id) 
+        stop_online_job(user_id) # Stop old job
         if user_id in active_userbots:
             client = active_userbots[user_id]
             await schedule_online_job(client, interval_to_set, context.application)
+    # --- End ---
     
     await update.message.reply_text("✅ Saved online interval settings.")
     context.user_data.clear()
     return ConversationHandler.END
 
+
 @owner_only
 async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    (Step 6, default) Handles /default command for interval.
+    """
     selected_accounts = context.user_data.get('selected_accounts', set())
     
     if accounts_collection is None:
@@ -1030,34 +1289,45 @@ async def set_interval_default(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     interval_to_set = "1440"
+    # Run blocking DB calls in a thread
     await asyncio.to_thread(
         accounts_collection.update_many,
         {"user_id": {"$in": list(selected_accounts)}},
         {"$set": {"online_interval": interval_to_set}}
     )
     
+    # --- NEW: Stop running jobs ---
     for user_id in selected_accounts:
-        stop_online_job(user_id) 
+        stop_online_job(user_id) # Stop old job
+        # No need to reschedule, 1440 means no job
+    # --- End ---
     
     await update.message.reply_text("✅ Saved online interval settings (reset to 1440).")
     context.user_data.clear()
     return ConversationHandler.END
 
+
 @owner_only
 async def cancel_interval_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the interval selection conversation."""
     context.user_data.clear()
     
+    # --- FIX: Edit message on cancel ---
     if update.callback_query:
         await update.callback_query.answer()
         try:
             await update.callback_query.edit_message_text("✖️ Online interval process cancelled.")
         except Exception:
+            # Fallback if editing fails
             await update.callback_query.message.reply_text("✖️ Online interval process cancelled.")
     else:
         await update.message.reply_text("✖️ Online interval process cancelled.")
+    # --- END FIX ---
             
     return ConversationHandler.END
 
+
+# --- Define the ConversationHandler ---
 online_interval_conv = ConversationHandler(
     entry_points=[
         CommandHandler("online_interval", online_interval_start)
@@ -1073,16 +1343,19 @@ online_interval_conv = ConversationHandler(
     fallbacks=[
         CommandHandler("cancel", cancel_interval_conv),
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel$"),
+        # --- FIX: Add specific cancel button handler ---
         CallbackQueryHandler(cancel_interval_conv, pattern="^cancel_oi_conv$"),
-        *COMMAND_FALLBACKS
+        *COMMAND_FALLBACKS # <-- BUGFIX
     ],
     conversation_timeout=600,
 )
 
-# --- MISC COMMANDS ---
+# --- NEW: /acc <name> command ---
 
 @owner_only
 async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /acc <identifier> - Shows detailed info for one account."""
+    
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
         return
@@ -1098,6 +1371,7 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
 
+    # Gather details
     unique_name = escape_html(account.get('unique_name', 'N/A'))
     first_name = escape_html(account.get('first_name', 'N/A'))
     phone = f"+{escape_html(account.get('phone_number', 'N/A'))}" if account.get('phone_number') else 'N/A'
@@ -1106,12 +1380,18 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
     interval = account.get('online_interval', '1440')
     interval_str = f"every {interval} minutes" if interval != '1440' else "every 24 hours (default)"
     
+    # OTP Forwarding (Notifications to Owner)
     otp_fwd_status = "💭 active" if OWNER_ID not in paused_notifications else "⏸️ paused (globally)"
+    
+    # OTP Destroying (Permanent Flag)
     otp_destroy_enabled = account.get("otp_destroy_enabled", True)
     otp_destroy_status = "💥💣🔢 active" if otp_destroy_enabled else "❌ DISABLED"
+    
+    # OTP Destroying (Temporary Pause)
     if otp_destroy_enabled and user_id in paused_forwarding:
         otp_destroy_status = "⏸️ paused (temporarily)"
     
+    # --- NEW: Show 2FA Status ---
     two_fa_pwd = account.get("two_fa_password")
     two_fa_status = "🔐 Stored" if two_fa_pwd else "⚠️ Not stored (Manual entry required for auto-updates)"
 
@@ -1143,6 +1423,8 @@ async def account_detail_command(update: Update, context: ContextTypes.DEFAULT_T
 
 @owner_only
 async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /toggle_otp_destroy <identifier> - Toggles permanent OTP destruction."""
+    
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available. Please check logs.")
         return
@@ -1158,9 +1440,11 @@ async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' not found.", parse_mode=ParseMode.HTML)
         return
 
+    # Toggle the boolean value
     current_status = account.get("otp_destroy_enabled", True)
     new_status = not current_status
     
+    # Run blocking DB calls in a thread
     await asyncio.to_thread(
         accounts_collection.update_one,
         {"_id": account["_id"]},
@@ -1173,11 +1457,19 @@ async def toggle_otp_destroy_command(update: Update, context: ContextTypes.DEFAU
         f"(<code>{escape_html(account.get('unique_name'))}</code>) is now permanently <b>{status_text}</b>."
     )
 
-# --- REMOVE CONVERSATION ---
+
+# --- /remove ConversationHandler ---
 
 @owner_only
 async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Entry point for /remove.
+    Handles both /remove (menu) and /remove <name> (direct).
+    """
+    
+    # --- NEW FEATURE: Handle /remove <name> ---
     if context.args:
+        # --- NOTIMPLEMENTEDERROR FIX ---
         if accounts_collection is None:
             await update.message.reply_html("⚠️ Database connection is not available. Please check logs.")
             return ConversationHandler.END
@@ -1194,8 +1486,10 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ Account '<code>{escape_html(identifier)}</code>' has no user_id. Cannot remove.", parse_mode=ParseMode.HTML)
             return ConversationHandler.END
 
+        # Store the single selected account
         context.user_data['selected_accounts'] = {user_id}
         
+        # Go straight to confirmation
         unique_name = account.get('unique_name')
         name = escape_html(unique_name) if unique_name else f"ID: {user_id}"
         
@@ -1212,8 +1506,9 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_html(text, reply_markup=reply_markup)
-        return AWAIT_CONFIRM_REMOVE
+        return AWAIT_CONFIRM_REMOVE # Skip to the confirmation state
 
+    # --- Original Flow: /remove (no args) ---
     keyboard = [[InlineKeyboardButton("Select Accounts to Remove 🗑️", callback_data="acct_rm_start")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_html(
@@ -1222,8 +1517,13 @@ async def remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return AWAIT_BUTTON_REMOVE
 
+
 @owner_only
 async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Callback for the start button.
+    Fetches all accounts, sets up user_data, and draws the menu.
+    """
     query = update.callback_query
     await query.answer()
     
@@ -1231,6 +1531,7 @@ async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Database connection is not available. Please check logs.")
         return ConversationHandler.END
 
+    # Run blocking DB calls in a thread
     all_accounts = await asyncio.to_thread(
         lambda: list(accounts_collection.find({}, {"user_id": 1}))
     )
@@ -1248,7 +1549,11 @@ async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await draw_account_selection_menu_remove(query, context)
     return SELECT_ACCOUNTS_REMOVE
 
-async def draw_account_selection_menu_remove(update_or_query, context):
+
+async def draw_account_selection_menu_remove(update_or_query: Update | CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Draws the paginated multi-select account menu for REMOVAL.
+    """
     if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
         query = update_or_query.callback_query
     elif hasattr(update_or_query, 'data'):
@@ -1273,7 +1578,9 @@ async def draw_account_selection_menu_remove(update_or_query, context):
     page_account_ids = all_account_ids[start_index:end_index]
     
     page_accounts = []
+    # --- NOTIMPLEMENTEDERROR FIX ---
     if accounts_collection is not None:
+        # Run blocking DB calls in a thread
         page_accounts = await asyncio.to_thread(
             lambda: list(accounts_collection.find(
                 {"user_id": {"$in": page_account_ids}},
@@ -1313,7 +1620,10 @@ async def draw_account_selection_menu_remove(update_or_query, context):
     for i in range(0, len(account_buttons), 2):
         keyboard.append(account_buttons[i:i+2])
         
+    # --- START OF BUTTON FIX ---
+    # We use a unique callback_data to avoid any pattern conflicts
     keyboard.append([InlineKeyboardButton("Done selecting 👌", callback_data="dnrm_done_select")])
+    # --- END OF BUTTON FIX ---
 
     page_buttons = []
     if current_page > 0:
@@ -1341,8 +1651,11 @@ async def draw_account_selection_menu_remove(update_or_query, context):
         
     return SELECT_ACCOUNTS_REMOVE
 
+
+# --- START: "DONE" BUTTON FIX (Reverting to 2-handler system) ---
 @owner_only
 async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Done Selecting' button press (dnrm_done_select)."""
     query = update.callback_query
     await query.answer()
     
@@ -1350,10 +1663,12 @@ async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEF
     
     if not selected_accounts:
         await query.answer("⚠️ Please select at least one account.", show_alert=True)
-        return SELECT_ACCOUNTS_REMOVE
+        return SELECT_ACCOUNTS_REMOVE # Stay in this state
     
     account_names = []
+    # --- NOTIMPLEMENTEDERROR FIX ---
     if accounts_collection is not None:
+        # Run blocking DB calls in a thread
         selected_docs = await asyncio.to_thread(
             lambda: list(accounts_collection.find(
                 {"user_id": {"$in": list(selected_accounts)}},
@@ -1384,10 +1699,12 @@ async def handle_remove_done_selecting(update: Update, context: ContextTypes.DEF
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-    return AWAIT_CONFIRM_REMOVE
+    return AWAIT_CONFIRM_REMOVE # Move to next state
+
 
 @owner_only
 async def handle_account_selection_callback_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all *other* button presses (acct_rm_)."""
     query = update.callback_query
     await query.answer()
     
@@ -1436,13 +1753,19 @@ async def handle_account_selection_callback_remove(update: Update, context: Cont
         
     context.user_data['selected_accounts'] = selected_accounts
     return await draw_account_selection_menu_remove(query, context)
+# --- END: "DONE" BUTTON FIX ---
 
+
+# --- START OF "INSTANT" HANG FIX ---
 async def _delete_account_in_background(user_id, account_doc_id):
+    """Helper function to run the blocking DB deletion in the background."""
+    # --- NOTIMPLEMENTEDERROR FIX ---
     if accounts_collection is None:
         logger.error(f"Background delete failed for {user_id}: DB not connected.")
         return
         
     try:
+        # Run the blocking DB call in a separate thread
         result = await asyncio.to_thread(
             accounts_collection.delete_one, 
             {"_id": account_doc_id}
@@ -1453,9 +1776,12 @@ async def _delete_account_in_background(user_id, account_doc_id):
             logger.warning(f"Background delete for {user_id} (doc_id {account_doc_id}) removed 0 documents.")
     except Exception as e:
         logger.error(f"Background delete failed for {user_id} (doc_id {account_doc_id}): {e}")
+# --- END OF "INSTANT" HANG FIX ---
+
 
 @owner_only
 async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the final Yes/No confirmation for removal."""
     query = update.callback_query
     await query.answer()
     
@@ -1464,52 +1790,67 @@ async def handle_remove_confirmation(update: Update, context: ContextTypes.DEFAU
         context.user_data.clear()
         return ConversationHandler.END
 
+    # User clicked YES (acct_rm_confirm_yes)
     selected_accounts = context.user_data.get('selected_accounts', set())
     if not selected_accounts:
         await query.edit_message_text("Error: No accounts selected. Action cancelled.")
         context.user_data.clear()
         return ConversationHandler.END
         
+    # --- "INSTANT" FIX: Removed "Scheduling" message ---
     await query.edit_message_text(f"🔄 Removing {len(selected_accounts)} accounts...")
     
     removed_accounts_display = []
     
     for user_id in selected_accounts:
         account = None
+        # --- NOTIMPLEMENTEDERROR FIX ---
         if accounts_collection is not None:
+            # We still need to fetch the account to get its _id,
+            # but this is a read operation (find_one) and should be fast.
             account = await asyncio.to_thread(
                 accounts_collection.find_one, 
                 {"user_id": user_id},
-                {"_id": 1, "unique_name": 1}
+                {"_id": 1, "unique_name": 1} # Only fetch what we need
             )
         
+        # Stop any running online jobs
         stop_online_job(user_id)
         
+        # "Fire-and-forget" stop for the Pyrogram client
         if user_id in active_userbots:
-            client_to_stop = active_userbots.pop(user_id) 
+            client_to_stop = active_userbots.pop(user_id) # Pop it immediately
             asyncio.create_task(client_to_stop.stop())
             logger.info(f"Scheduled client {user_id} for background stop.")
             
+        # --- "INSTANT" FIX: "Fire-and-forget" the database deletion ---
         if account:
             account_doc_id = account["_id"]
+            # This runs the delete in the background. The bot does NOT wait for it.
             asyncio.create_task(_delete_account_in_background(user_id, account_doc_id))
             
             name = escape_html(account.get('unique_name') or f"ID: {user_id}")
+            # The message confirms the *action* (removal), not the *result*
             removed_accounts_display.append(f"☑️ {name} removal initiated.")
         else:
             logger.warning(f"Could not find account doc for user_id {user_id} to delete.")
+        # --- END OF "INSTANT" FIX ---
             
     final_message = "\n".join(removed_accounts_display)
     if not final_message:
         final_message = "No accounts were found to remove."
         
+    # Show the "removal initiated" message immediately
     await query.edit_message_text(final_message)
     context.user_data.clear()
     return ConversationHandler.END
 
+
 @owner_only
 async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the remove selection conversation."""
     context.user_data.clear()
+    
     if update.callback_query:
         await update.callback_query.answer()
         try:
@@ -1518,18 +1859,28 @@ async def cancel_remove_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.callback_query.message.reply_text("✖️ Remove process cancelled.")
     else:
         await update.message.reply_text("✖️ Remove process cancelled.")
+            
     return ConversationHandler.END
 
+
+# --- Define the ConversationHandler ---
 remove_conv = ConversationHandler(
     entry_points=[
-        CommandHandler("remove", remove_start) 
+        CommandHandler("remove", remove_start) # Now handles /remove AND /remove <name>
     ],
     states={
         AWAIT_BUTTON_REMOVE: [CallbackQueryHandler(remove_menu, pattern="^acct_rm_start$")],
+        
+        # --- START OF BUTTON FIX (Reverted to 2-handler) ---
         SELECT_ACCOUNTS_REMOVE: [
+            # This specific pattern for the "Done" button MUST come first
             CallbackQueryHandler(handle_remove_done_selecting, pattern=r"^dnrm_done_select$"),
+            
+            # This pattern handles all other buttons (toggle, page, select all)
             CallbackQueryHandler(handle_account_selection_callback_remove, pattern=r"^acct_rm_")
         ],
+        # --- END OF BUTTON FIX ---
+        
         AWAIT_CONFIRM_REMOVE: [CallbackQueryHandler(handle_remove_confirmation, pattern=r"^acct_rm_confirm_")],
     },
     fallbacks=[
@@ -1541,17 +1892,27 @@ remove_conv = ConversationHandler(
     conversation_timeout=600,
 )
 
+
+# --- Deduplication Command (Now with non-blocking DB calls) ---
+
 @owner_only
 async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Finds and removes duplicate account entries from the database.
+    Keeps the *first* entry found for each duplicate group and deletes the rest.
+    """
     msg = await update.message.reply_text("🔄 Stopping all accounts before deduplication...")
+    
     if accounts_collection is None:
         await msg.edit_text("⚠️ Database connection is not available. Please check logs.")
         return
 
+    # 1. Stop all running jobs
     logger.info(f"Stopping {len(active_online_jobs)} online jobs...")
     for user_id in list(active_online_jobs.keys()):
         stop_online_job(user_id)
     
+    # 2. Stop all running clients
     if active_userbots:
         logger.info(f"Stopping {len(active_userbots)} userbot clients...")
         stop_tasks = []
@@ -1564,9 +1925,12 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
     await msg.edit_text("Bots stopped. 🤖 Now searching for duplicates (this may take a moment)...")
     
     try:
+        # --- NON-BLOCKING FIX ---
+        # Sort by _id to ensure "first" is consistent
         all_accounts = await asyncio.to_thread(
             lambda: list(accounts_collection.find().sort([("_id", 1)]))
         )
+        # --- END NON-BLOCKING FIX ---
         
         seen_user_ids = set()
         seen_unique_names = set()
@@ -1584,6 +1948,7 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
             
             delete_this_doc = False
             
+            # 1. Check user_id duplicates
             if user_id is not None:
                 if user_id in seen_user_ids:
                     logger.warning(f"[Deduplicate] Found user_id duplicate: {user_id}. Marking {doc_id} for deletion.")
@@ -1592,13 +1957,14 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
                 else:
                     seen_user_ids.add(user_id)
             
+            # 2. Check unique_name duplicates (case and whitespace insensitive)
             if unique_name is not None:
                 name_key = str(unique_name).strip().lower()
                 
-                if name_key: 
+                if name_key: # Ensure it's not an empty string
                     if name_key in seen_unique_names:
                         logger.warning(f"[Deduplicate] Found unique_name duplicate: '{name_key}'. Marking {doc_id} for deletion.")
-                        if not delete_this_doc: 
+                        if not delete_this_doc: # Only count if not already marked
                             name_deleted_count += 1
                         delete_this_doc = True
                     else:
@@ -1609,6 +1975,7 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
 
         total_deleted = 0
         if ids_to_delete:
+            # Get unique list of doc IDs to delete
             unique_ids_to_delete = list(set(ids_to_delete))
             
             await msg.edit_text(
@@ -1618,13 +1985,16 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
                 "🔄 Removing from database..."
             )
             
+            # --- NON-BLOCKING FIX ---
             result = await asyncio.to_thread(
                 accounts_collection.delete_many, 
                 {"_id": {"$in": unique_ids_to_delete}}
             )
             total_deleted = result.deleted_count
+            # --- END NON-BLOCKING FIX ---
             logger.info(f"[Deduplicate] Successfully deleted {total_deleted} documents.")
         
+        # --- 5. Report ---
         final_message = (
             f"✅ <b>Deduplication Complete</b>\n"
             f"Removed {uid_deleted_count} duplicates by user_id.\n"
@@ -1642,10 +2012,14 @@ async def deduplicate_db_command(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Error during deduplication: {e}")
         await msg.edit_text(f"An error occurred: {e}")
 
-# --- 2FA Config ---
+# --- NEW: Manual 2FA Update Command ---
 
 @owner_only
 async def update_2fa_password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Updates the stored 2FA password in the database manually.
+    Usage: /update2fa <name_or_id> <password>
+    """
     if accounts_collection is None:
         await update.message.reply_text("⚠️ Database connection is not available.")
         return
@@ -1655,7 +2029,10 @@ async def update_2fa_password_command(update: Update, context: ContextTypes.DEFA
         return
     
     identifier = context.args[0]
-    new_password = context.args[1] 
+    new_password = context.args[1] # Take only the second argument as password
+    
+    # We might want to support spaces in passwords later, but for now strict
+    # if len(context.args) > 2: ... (logic for spaced passwords)
     
     account = await get_account_from_arg(identifier)
     
@@ -1672,6 +2049,9 @@ async def update_2fa_password_command(update: Update, context: ContextTypes.DEFA
     await update.message.reply_html(
         f"✅ Updated stored 2FA password for <b>{escape_html(account.get('first_name'))}</b> (<code>{account.get('user_id')}</code>)."
     )
+
+
+# --- NEW: 2FA Configuration Conversation ---
 
 @owner_only
 async def two_fa_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1695,6 +2075,7 @@ async def two_fa_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ Database connection is not available.")
         return ConversationHandler.END
 
+    # Get all accounts from DB
     all_accounts = await asyncio.to_thread(
         lambda: list(accounts_collection.find({}, {"user_id": 1}))
     )
@@ -1869,25 +2250,33 @@ async def handle_2fa_password_input(update: Update, context: ContextTypes.DEFAUL
     )
     return AWAIT_HINT_2FA
 
+# --- REBUILT LOGIC FOR SEQUENTIAL 2FA PROCESSING ---
+
 @owner_only
 async def handle_2fa_hint_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the hint input and initiates the processing queue."""
     hint_input = update.message.text.strip()
     
+    # Store settings
     context.user_data['new_2fa_hint'] = hint_input
     selected_accounts = context.user_data.get('selected_accounts', set())
     
+    # Initialize Queue
     context.user_data['pending_2fa_ids'] = list(selected_accounts)
     context.user_data['2fa_results'] = []
-    context.user_data['current_2fa_user_id'] = None 
+    context.user_data['current_2fa_user_id'] = None # Used for retries
     
     await update.message.reply_text(f"🚀 Starting 2FA update for {len(selected_accounts)} accounts...")
     
+    # Start Processing
     return await process_2fa_queue(update, context)
 
 async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Processes the queue of accounts for 2FA updates.
+    Returns:
+      - ConversationHandler.END if finished.
+      - AWAIT_CURRENT_2FA_PASSWORD if an interruption occurs.
     """
     results = context.user_data.get('2fa_results', [])
     
@@ -1899,6 +2288,8 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_password = new_password if not disable_mode else None
     target_hint = hint_input if hint_input != "#empty#" else None
 
+    # Loop until we run out of accounts OR we hit an interruption
+    # --- FIX: Refactored loop to correctly manage retry IDs ---
     while True:
         pending_ids = context.user_data.get('pending_2fa_ids', [])
         current_retry_id = context.user_data.get('current_2fa_user_id')
@@ -1906,10 +2297,12 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pending_ids and not current_retry_id:
             break
         
+        # Determine which user to process
         if current_retry_id:
             user_id = current_retry_id
         else:
             user_id = pending_ids.pop(0)
+            # Add delay only if it's a new account from the queue (not the first one)
             if len(results) > 0 and delay > 0:
                 await asyncio.sleep(delay)
 
@@ -1917,13 +2310,14 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user_id not in active_userbots:
             results.append(f"❌ {account_name}: Bot is OFFLINE.")
-            context.user_data['current_2fa_user_id'] = None 
+            context.user_data['current_2fa_user_id'] = None # Reset retry
             continue
 
         client = active_userbots[user_id]
         if client.me:
              account_name = escape_html(client.me.first_name)
 
+        # Get stored password
         try:
             account_doc = await asyncio.to_thread(
                 accounts_collection.find_one,
@@ -1939,10 +2333,12 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await client.disable_cloud_password(password=current_db_pwd)
                     results.append(f"✅ {account_name}: 2FA Disabled.")
                 else:
+                    # Try without password
                     try:
                         await client.disable_cloud_password() 
                         results.append(f"✅ {account_name}: 2FA Disabled (No pwd required).")
                     except (PasswordHashInvalid, BadRequest):
+                        # INTERRUPTION NEEDED
                         context.user_data['current_2fa_user_id'] = user_id # Set for retry
                         await update.message.reply_html(
                             f"🔐 <b>Current 2FA Password Required</b>\n\n"
@@ -1950,18 +2346,22 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"Please send the <b>CURRENT</b> 2FA password for this account to continue.\n"
                             f"<i>(Send /skip to skip this account)</i>"
                         )
-                        return AWAIT_CURRENT_2FA_PASSWORD 
+                        return AWAIT_CURRENT_2FA_PASSWORD # Pause execution here
 
             else:
+                # Enabling/Changing
                 if current_db_pwd:
+                    # --- FIX: Changed hint=target_hint to new_hint=target_hint ---
                     await client.change_cloud_password(current_password=current_db_pwd, new_password=target_password, new_hint=target_hint)
                     results.append(f"✅ {account_name}: 2FA Changed.")
                 else:
+                    # Try enabling
                     try:
                         await client.enable_cloud_password(password=target_password, hint=target_hint)
                         results.append(f"✅ {account_name}: 2FA Enabled.")
                     except (BadRequest, Exception) as inner_e:
                         if "PASSWORD_ALREADY_ENABLED" in str(inner_e) or "cloud password" in str(inner_e).lower():
+                             # INTERRUPTION NEEDED
                              context.user_data['current_2fa_user_id'] = user_id # Set for retry
                              await update.message.reply_html(
                                 f"🔐 <b>Current 2FA Password Required</b>\n\n"
@@ -1969,19 +2369,22 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 f"Please send the <b>CURRENT</b> 2FA password for this account to continue.\n"
                                 f"<i>(Send /skip to skip this account)</i>"
                              )
-                             return AWAIT_CURRENT_2FA_PASSWORD 
+                             return AWAIT_CURRENT_2FA_PASSWORD # Pause execution here
                         else:
                              raise inner_e
 
+            # If success, update stored password
             final_stored_pwd = target_password if not disable_mode else None
             await asyncio.to_thread(
                 accounts_collection.update_one,
                 {"user_id": user_id},
                 {"$set": {"two_fa_password": final_stored_pwd}}
             )
+            # Clear retry ID since success
             context.user_data['current_2fa_user_id'] = None
 
         except PasswordHashInvalid:
+             # INTERRUPTION NEEDED (Wrong Password)
              context.user_data['current_2fa_user_id'] = user_id
              await update.message.reply_html(
                 f"🔐 <b>Incorrect 2FA Password</b>\n\n"
@@ -1995,6 +2398,7 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results.append(f"⚠️ {account_name}: {e}")
             context.user_data['current_2fa_user_id'] = None
 
+    # Loop Finished
     final_text = "<b>2FA Batch Update Complete</b>\n\n" + "\n".join(results)
     if len(final_text) > 4000:
         final_text = final_text[:4000] + "\n... (truncated)"
@@ -2005,6 +2409,9 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def handle_current_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Receives the missing 2FA password, updates DB, and resumes the queue.
+    """
     password = update.message.text.strip()
     user_id = context.user_data.get('current_2fa_user_id')
     
@@ -2012,6 +2419,7 @@ async def handle_current_2fa_password_input(update: Update, context: ContextType
         await update.message.reply_text("Error: Lost track of the account ID. Aborting.")
         return ConversationHandler.END
         
+    # Update DB with the provided password
     await asyncio.to_thread(
         accounts_collection.update_one,
         {"user_id": user_id},
@@ -2019,22 +2427,26 @@ async def handle_current_2fa_password_input(update: Update, context: ContextType
     )
     
     await update.message.reply_text("✅ Password saved. Retrying...")
+    
+    # Resume Queue (The user_id is still set in current_2fa_user_id, so it will retry)
     return await process_2fa_queue(update, context)
 
 @owner_only
 async def skip_current_2fa_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skipts the current account in the 2FA queue."""
     user_id = context.user_data.get('current_2fa_user_id')
     results = context.user_data.get('2fa_results', [])
     
     if user_id:
         results.append(f"⏩ ID {user_id}: Skipped by user.")
-        context.user_data['current_2fa_user_id'] = None 
+        context.user_data['current_2fa_user_id'] = None # Clear so loop moves to next
     
     await update.message.reply_text("⏩ Account skipped.")
     return await process_2fa_queue(update, context)
 
 @owner_only
 async def cancel_2fa_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the 2FA conversation."""
     context.user_data.clear()
     msg = "✖️ 2FA configuration cancelled."
     if update.callback_query:
@@ -2053,6 +2465,7 @@ two_fa_conv = ConversationHandler(
         AWAIT_DELAY_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_delay_input)],
         AWAIT_PASSWORD_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_password_input)],
         AWAIT_HINT_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa_hint_input)],
+        # --- NEW STATE ---
         AWAIT_CURRENT_2FA_PASSWORD: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_current_2fa_password_input),
             CommandHandler("skip", skip_current_2fa_account)
