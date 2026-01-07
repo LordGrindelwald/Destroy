@@ -2420,10 +2420,11 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def hard_delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Forcefully removes ALL documents with a specific user_id.
+    Cleans Active Memory (RAM) AND Database.
     Usage: /nuke <user_id>
     """
     if not context.args:
-        await update.message.reply_text("Usage: /nuke <user_id> (Get ID from /debug_acc or your client)")
+        await update.message.reply_text("Usage: /nuke <user_id>")
         return
 
     try:
@@ -2432,44 +2433,45 @@ async def hard_delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Please provide a valid integer User ID.")
         return
 
-    if accounts_collection is None:
-        await update.message.reply_text("⚠️ Database connection error.")
-        return
-
-    # Check how many exist
-    count = await asyncio.to_thread(
-        accounts_collection.count_documents,
-        {"user_id": target_id}
-    )
-
-    if count == 0:
-        await update.message.reply_text(f"ℹ️ No records found for ID <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
-        return
-
-    # Perform Hard Delete
-    result = await asyncio.to_thread(
-        accounts_collection.delete_many,
-        {"user_id": target_id}
-    )
-
-    # Stop any active clients for this ID immediately
+    messages = []
+    
+    # 1. NUCLEAR CLEANUP: Active Memory (RAM)
+    # Check if this ID is currently stuck in the running bot list
     if target_id in active_userbots:
         try:
-            await active_userbots[target_id].stop()
+            client = active_userbots[target_id]
+            if client.is_connected:
+                await client.stop()
             del active_userbots[target_id]
-        except:
-            pass
-            
-    # Clean up any jobs
-    stop_online_job(target_id)
+            messages.append(f"🧠 <b>Memory:</b> Removed stuck active session.")
+        except Exception as e:
+            messages.append(f"🧠 <b>Memory:</b> Error stopping session: {e}")
+    else:
+        messages.append("🧠 <b>Memory:</b> No active session found.")
 
-    await update.message.reply_html(
-        f"☢️ <b>NUCLEAR DELETE EXECUTED</b>\n"
-        f"Target ID: <code>{target_id}</code>\n"
-        f"Documents Removed: {result.deleted_count}\n"
-        f"Active Session Stopped: Yes\n\n"
-        f"<i>You can now re-add this account cleanly.</i>"
-    )
+    # 2. Cleanup: Scheduled Jobs
+    # Stop any online/offline ping jobs for this ID
+    if target_id in active_online_jobs:
+        stop_online_job(target_id)
+        messages.append("⌚ <b>Jobs:</b> Stopped background tasks.")
+
+    # 3. NUCLEAR CLEANUP: Database
+    if accounts_collection is not None:
+        # Perform Hard Delete
+        result = await asyncio.to_thread(
+            accounts_collection.delete_many,
+            {"user_id": target_id}
+        )
+        if result.deleted_count > 0:
+             messages.append(f"💽 <b>Database:</b> Deleted {result.deleted_count} records.")
+        else:
+             messages.append("💽 <b>Database:</b> No records found.")
+    else:
+        messages.append("⚠️ <b>Database:</b> Connection failed.")
+
+    # Send summary
+    final_text = f"☢️ <b>NUCLEAR REPORT for {target_id}</b>\n\n" + "\n".join(messages)
+    await update.message.reply_html(final_text)
 
 @owner_only
 async def handle_current_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
