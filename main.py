@@ -30,7 +30,7 @@ from bot_handlers import (
     account_detail_command, toggle_otp_destroy_command, 
     two_fa_conv, update_2fa_password_command,
     # NEW IMPORTS
-    backup_command, restore_command, encrypt_past_command, fix_db_command, debug_account_command
+    backup_command, restore_command, encrypt_past_command, fix_db_command, debug_account_command, hard_delete_command
 )
 
 async def do_nothing(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,6 +90,7 @@ def main() -> None:
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("deduplicate_db", deduplicate_db_command))
+    application.add_handler(CommandHandler("nuke", hard_delete_command))
     application.add_handler(CommandHandler("init_abc", do_nothing))
 
     # --- NEW COMMANDS ---

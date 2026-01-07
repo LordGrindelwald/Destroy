@@ -2417,6 +2417,61 @@ async def process_2fa_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 @owner_only
+async def hard_delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Forcefully removes ALL documents with a specific user_id.
+    Usage: /nuke <user_id>
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: /nuke <user_id> (Get ID from /debug_acc or your client)")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid integer User ID.")
+        return
+
+    if accounts_collection is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+
+    # Check how many exist
+    count = await asyncio.to_thread(
+        accounts_collection.count_documents,
+        {"user_id": target_id}
+    )
+
+    if count == 0:
+        await update.message.reply_text(f"ℹ️ No records found for ID <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+        return
+
+    # Perform Hard Delete
+    result = await asyncio.to_thread(
+        accounts_collection.delete_many,
+        {"user_id": target_id}
+    )
+
+    # Stop any active clients for this ID immediately
+    if target_id in active_userbots:
+        try:
+            await active_userbots[target_id].stop()
+            del active_userbots[target_id]
+        except:
+            pass
+            
+    # Clean up any jobs
+    stop_online_job(target_id)
+
+    await update.message.reply_html(
+        f"☢️ <b>NUCLEAR DELETE EXECUTED</b>\n"
+        f"Target ID: <code>{target_id}</code>\n"
+        f"Documents Removed: {result.deleted_count}\n"
+        f"Active Session Stopped: Yes\n\n"
+        f"<i>You can now re-add this account cleanly.</i>"
+    )
+
+@owner_only
 async def handle_current_2fa_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Receives the missing 2FA password, updates DB, and resumes the queue.
